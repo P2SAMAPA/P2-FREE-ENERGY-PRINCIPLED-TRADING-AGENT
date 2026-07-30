@@ -21,19 +21,12 @@ class GenerativeModel:
         self.obs_dim = obs_dim
         self.action_dim = action_dim
         
-        # Transition model: p(s_{t+1} | s_t, a_t)
         self.transition_mean = np.zeros((state_dim, state_dim + action_dim))
-        self.transition_cov = np.eye(state_dim) * 0.1  # Smaller initial covariance
-        
-        # Observation model: p(o_t | s_t)
+        self.transition_cov = np.eye(state_dim) * 0.1
         self.obs_mean = np.zeros((obs_dim, state_dim))
-        self.obs_cov = np.eye(obs_dim) * 0.1  # Smaller initial covariance
-        
-        # Prior over initial state
+        self.obs_cov = np.eye(obs_dim) * 0.1
         self.prior_mean = np.zeros(state_dim)
         self.prior_cov = np.eye(state_dim) * 0.1
-        
-        # Learning parameters
         self.learning_rate = 0.001
         self.steps = 0
         self.window = 252
@@ -47,12 +40,12 @@ class GenerativeModel:
         action_onehot[action] = 1.0
         combined = np.concatenate([state, action_onehot])
         mean = self.transition_mean @ combined
-        cov = self.transition_cov + np.eye(self.state_dim) * 1e-4  # Add small jitter
+        cov = self.transition_cov + np.eye(self.state_dim) * 1e-4
         return mean, cov
     
     def predict_observation(self, state: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         mean = self.obs_mean @ state
-        cov = self.obs_cov + np.eye(self.obs_dim) * 1e-4  # Add small jitter
+        cov = self.obs_cov + np.eye(self.obs_dim) * 1e-4
         return mean, cov
     
     def update(self, state: np.ndarray, action: int, next_state: np.ndarray, 
@@ -219,14 +212,10 @@ class MultiWindowFEPAgent:
         ensemble = self.ensembles[window]
         next_mean, next_var = ensemble.predict(state, action)
         
-        # Safe computation with numerical stability
         surprise = 0.5 * np.sum((next_mean - state) ** 2 / (next_var + 1e-6))
-        
-        # Epistemic value: reduction in model uncertainty
         epistemic = np.mean(next_var) / (np.mean(next_var) + 1e-6)
-        epistemic = np.clip(epistemic, 0, 1)  # Clamp to [0,1]
+        epistemic = np.clip(epistemic, 0, 1)
         
-        # KL divergence (simplified with safe computation)
         prior_mean = ensemble.models[0].prior_mean
         prior_cov_diag = ensemble.models[0].prior_cov.diagonal() + 1e-6
         kl_div = 0.5 * np.sum((next_mean - prior_mean) ** 2 / prior_cov_diag)
@@ -234,7 +223,6 @@ class MultiWindowFEPAgent:
         pragmatic_value = -surprise
         epistemic_value = epistemic * self.lambda_epistemic
         
-        # Free energy: lower is better
         free_energy = (self.lambda_pragmatic * pragmatic_value + 
                        self.lambda_epistemic * epistemic_value -
                        self.beta * kl_div)
@@ -257,7 +245,6 @@ class MultiWindowFEPAgent:
             result = self.compute_free_energy_for_window(state, action, window)
             results.append(result)
         
-        # Weight windows
         weights = {}
         for w in self.windows:
             if w == self.primary_window:
@@ -287,7 +274,6 @@ class MultiWindowFEPAgent:
         
         fe_values = np.array([a["free_energy"] for a in action_values])
         
-        # Softmax with numerical stability
         fe_values_shifted = fe_values - np.max(fe_values)
         if explore:
             exp_vals = np.exp(self.beta * fe_values_shifted)
@@ -298,7 +284,6 @@ class MultiWindowFEPAgent:
         
         selected_action = np.random.choice(self.n_actions, p=probs)
         
-        # Position limits
         if self.position >= self.max_position * 0.9 and selected_action == 0:
             selected_action = 1
         if self.position <= -self.max_position * 0.9 and selected_action == 2:
@@ -315,7 +300,6 @@ class MultiWindowFEPAgent:
         return result
     
     def compute_surprise(self, observation: np.ndarray) -> float:
-        """Compute surprise with numerical stability."""
         if self.position == 0:
             state = np.zeros(self.state_dim)
         else:
@@ -325,15 +309,13 @@ class MultiWindowFEPAgent:
         for window, ensemble in self.ensembles.items():
             try:
                 mean, cov = ensemble.predict_observation(state)
-                # Add small jitter to covariance for numerical stability
                 cov_reg = cov + np.eye(len(mean)) * 1e-4
                 diff = observation[:len(mean)] - mean[:len(mean)]
-                # Use pseudo-inverse for stability
                 inv_cov = np.linalg.pinv(cov_reg)
                 surprise = diff @ inv_cov @ diff
                 surprises.append(surprise)
             except Exception:
-                surprises.append(1.0)  # Default surprise
+                surprises.append(1.0)
         
         return float(np.mean(surprises)) if surprises else 1.0
 
@@ -357,7 +339,7 @@ def compute_fep_signals(
             "position": 0.0,
             "action_probabilities": [0.33, 0.33, 0.34],
             "window_signals": [],
-            "error": "Insufficient data"
+            "error": "Insufficient data (need at least 50 days)"
         }
     
     try:
@@ -407,9 +389,11 @@ def compute_fep_signals(
             "pragmatic_value": result.get("pragmatic_value", 0),
             "epistemic_value": result.get("epistemic_value", 0),
             "kl_div": result.get("kl_div", 0),
-            "error": None
+            "error": None  # No error
         }
     except Exception as e:
+        import traceback
+        error_msg = str(e)
         return {
             "action": "HOLD",
             "free_energy": 0.0,
@@ -418,7 +402,7 @@ def compute_fep_signals(
             "position": 0.0,
             "action_probabilities": [0.33, 0.33, 0.34],
             "window_signals": [],
-            "error": str(e)
+            "error": error_msg
         }
 
 
