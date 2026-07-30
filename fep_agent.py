@@ -23,15 +23,15 @@ class GenerativeModel:
         
         # Transition model: p(s_{t+1} | s_t, a_t)
         self.transition_mean = np.zeros((state_dim, state_dim + action_dim))
-        self.transition_cov = np.eye(state_dim)
+        self.transition_cov = np.eye(state_dim) * 0.1  # Smaller initial covariance
         
         # Observation model: p(o_t | s_t)
         self.obs_mean = np.zeros((obs_dim, state_dim))
-        self.obs_cov = np.eye(obs_dim)
+        self.obs_cov = np.eye(obs_dim) * 0.1  # Smaller initial covariance
         
         # Prior over initial state
         self.prior_mean = np.zeros(state_dim)
-        self.prior_cov = np.eye(state_dim)
+        self.prior_cov = np.eye(state_dim) * 0.1
         
         # Learning parameters
         self.learning_rate = 0.001
@@ -47,12 +47,12 @@ class GenerativeModel:
         action_onehot[action] = 1.0
         combined = np.concatenate([state, action_onehot])
         mean = self.transition_mean @ combined
-        cov = self.transition_cov
+        cov = self.transition_cov + np.eye(self.state_dim) * 1e-4  # Add small jitter
         return mean, cov
     
     def predict_observation(self, state: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         mean = self.obs_mean @ state
-        cov = self.obs_cov
+        cov = self.obs_cov + np.eye(self.obs_dim) * 1e-4  # Add small jitter
         return mean, cov
     
     def update(self, state: np.ndarray, action: int, next_state: np.ndarray, 
@@ -76,7 +76,7 @@ class GenerativeModel:
 class EnsembleModel:
     """Ensemble of generative models."""
     
-    def __init__(self, n_models: int = 5, state_dim: int = 16, 
+    def __init__(self, n_models: int = 3, state_dim: int = 16, 
                  obs_dim: int = 10, action_dim: int = 3, window: int = 252):
         self.models = [
             GenerativeModel(state_dim, obs_dim, action_dim)
@@ -93,7 +93,7 @@ class EnsembleModel:
             mean, _ = model.predict_state(state, action)
             predictions.append(mean)
         predictions = np.array(predictions)
-        return np.mean(predictions, axis=0), np.var(predictions, axis=0)
+        return np.mean(predictions, axis=0), np.var(predictions, axis=0) + 1e-4
     
     def predict_observation(self, state: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         predictions = []
@@ -101,7 +101,7 @@ class EnsembleModel:
             mean, _ = model.predict_observation(state)
             predictions.append(mean)
         predictions = np.array(predictions)
-        return np.mean(predictions, axis=0), np.var(predictions, axis=0)
+        return np.mean(predictions, axis=0), np.var(predictions, axis=0) + 1e-4
     
     def update(self, state: np.ndarray, action: int, next_state: np.ndarray,
                observation: np.ndarray, learning_rate: float = 0.001):
@@ -126,7 +126,7 @@ class MultiWindowFEPAgent:
         self.ensembles = {}
         for window in self.windows:
             self.ensembles[window] = EnsembleModel(
-                n_models=config.get("ensemble_size", 3),  # Reduced from 5 to 3 for speed
+                n_models=config.get("ensemble_size", 3),
                 state_dim=self.state_dim,
                 obs_dim=self.obs_dim,
                 action_dim=self.action_dim,
@@ -181,11 +181,10 @@ class MultiWindowFEPAgent:
         if self._trained or len(returns) < 50:
             return
         
-        # Use last 100 days for quick training
         train_len = min(100, len(returns) - 10)
         train_returns = returns[-train_len-10:]
         
-        for i in range(5, len(train_returns) - 5, 2):  # Step by 2 for speed
+        for i in range(5, len(train_returns) - 5, 2):
             window_returns = train_returns[max(0, i-10):i+1]
             window_macro = macro[max(0, i-5):i+1] if len(macro) > 0 else np.zeros((1, 6))
             
@@ -220,15 +219,22 @@ class MultiWindowFEPAgent:
         ensemble = self.ensembles[window]
         next_mean, next_var = ensemble.predict(state, action)
         
+        # Safe computation with numerical stability
         surprise = 0.5 * np.sum((next_mean - state) ** 2 / (next_var + 1e-6))
-        epistemic = np.mean(next_var) / (np.mean(next_var) + 1e-6)
         
-        kl_div = 0.5 * np.sum((next_mean - ensemble.models[0].prior_mean) ** 2 / 
-                               (ensemble.models[0].prior_cov.diagonal() + 1e-6))
+        # Epistemic value: reduction in model uncertainty
+        epistemic = np.mean(next_var) / (np.mean(next_var) + 1e-6)
+        epistemic = np.clip(epistemic, 0, 1)  # Clamp to [0,1]
+        
+        # KL divergence (simplified with safe computation)
+        prior_mean = ensemble.models[0].prior_mean
+        prior_cov_diag = ensemble.models[0].prior_cov.diagonal() + 1e-6
+        kl_div = 0.5 * np.sum((next_mean - prior_mean) ** 2 / prior_cov_diag)
         
         pragmatic_value = -surprise
         epistemic_value = epistemic * self.lambda_epistemic
         
+        # Free energy: lower is better
         free_energy = (self.lambda_pragmatic * pragmatic_value + 
                        self.lambda_epistemic * epistemic_value -
                        self.beta * kl_div)
@@ -251,6 +257,7 @@ class MultiWindowFEPAgent:
             result = self.compute_free_energy_for_window(state, action, window)
             results.append(result)
         
+        # Weight windows
         weights = {}
         for w in self.windows:
             if w == self.primary_window:
@@ -280,14 +287,18 @@ class MultiWindowFEPAgent:
         
         fe_values = np.array([a["free_energy"] for a in action_values])
         
+        # Softmax with numerical stability
+        fe_values_shifted = fe_values - np.max(fe_values)
         if explore:
-            probs = softmax(self.beta * fe_values)
+            exp_vals = np.exp(self.beta * fe_values_shifted)
+            probs = exp_vals / (np.sum(exp_vals) + 1e-8)
         else:
             probs = np.zeros(self.n_actions)
             probs[np.argmax(fe_values)] = 1.0
         
         selected_action = np.random.choice(self.n_actions, p=probs)
         
+        # Position limits
         if self.position >= self.max_position * 0.9 and selected_action == 0:
             selected_action = 1
         if self.position <= -self.max_position * 0.9 and selected_action == 2:
@@ -301,29 +312,30 @@ class MultiWindowFEPAgent:
         result["position"] = self.position
         result["action_probabilities"] = probs.tolist()
         
-        self.action_history.append({
-            "action": selected_action,
-            "position": self.position,
-            "free_energy": result["free_energy"]
-        })
-        
         return result
     
     def compute_surprise(self, observation: np.ndarray) -> float:
+        """Compute surprise with numerical stability."""
         if self.position == 0:
             state = np.zeros(self.state_dim)
         else:
-            state = np.ones(self.state_dim) * self.position
+            state = np.ones(self.state_dim) * np.clip(self.position, -1, 1)
         
         surprises = []
         for window, ensemble in self.ensembles.items():
-            mean, cov = ensemble.predict_observation(state)
-            diff = observation - mean
-            inv_cov = np.linalg.inv(cov + 1e-6 * np.eye(len(mean)))
-            surprise = diff @ inv_cov @ diff
-            surprises.append(surprise)
+            try:
+                mean, cov = ensemble.predict_observation(state)
+                # Add small jitter to covariance for numerical stability
+                cov_reg = cov + np.eye(len(mean)) * 1e-4
+                diff = observation[:len(mean)] - mean[:len(mean)]
+                # Use pseudo-inverse for stability
+                inv_cov = np.linalg.pinv(cov_reg)
+                surprise = diff @ inv_cov @ diff
+                surprises.append(surprise)
+            except Exception:
+                surprises.append(1.0)  # Default surprise
         
-        return float(np.mean(surprises))
+        return float(np.mean(surprises)) if surprises else 1.0
 
 
 def compute_fep_signals(
@@ -348,65 +360,55 @@ def compute_fep_signals(
             "error": "Insufficient data"
         }
     
-    agent = MultiWindowFEPAgent(config)
-    
-    if train_agent and len(returns) > 60:
-        agent.quick_train(returns, macro)
-    
-    latest_returns = returns[-20:]
-    latest_macro = macro[-5:] if len(macro) > 0 else np.zeros((1, 6))
-    
-    state = agent.encode_state(
-        latest_returns,
-        latest_macro.flatten()[:6] if len(latest_macro) > 0 else np.zeros(6),
-        agent.primary_window
-    )
-    
-    result = agent.select_action(state, explore=False)
-    
-    obs = np.concatenate([
-        returns[-1:],
-        latest_macro.flatten()[:9] if len(latest_macro) > 0 else np.zeros(9)
-    ])
-    surprise = agent.compute_surprise(obs[:agent.obs_dim])
-    
-    window_signals = []
-    if "window_results" in result:
-        for wr in result["window_results"]:
-            window_signals.append({
-                "window": wr["window"],
-                "free_energy": wr["free_energy"],
-                "surprise": wr["surprise"],
-                "epistemic": wr["epistemic"],
-                "action": wr["action_label"]
-            })
-    
-    return {
-        "action": result["action_label"],
-        "action_index": result["action"],
-        "free_energy": result["free_energy"],
-        "surprise": surprise,
-        "epistemic": result["epistemic"],
-        "position": result["position"],
-        "action_probabilities": result["action_probabilities"],
-        "window_signals": window_signals,
-        "weights": result.get("weights", {}),
-        "pragmatic_value": result.get("pragmatic_value", 0),
-        "epistemic_value": result.get("epistemic_value", 0),
-        "kl_div": result.get("kl_div", 0),
-        "error": None
-    }
-
-
-def compute_agent_signal(
-    prices: pd.Series,
-    macro_df: pd.DataFrame,
-    agent_config: Dict
-) -> Dict:
-    """Wrapper for FEP signal computation."""
     try:
-        result = compute_fep_signals(prices, macro_df, agent_config, train_agent=True)
-        return result
+        agent = MultiWindowFEPAgent(config)
+        
+        if train_agent and len(returns) > 60:
+            agent.quick_train(returns, macro)
+        
+        latest_returns = returns[-20:]
+        latest_macro = macro[-5:] if len(macro) > 0 else np.zeros((1, 6))
+        
+        state = agent.encode_state(
+            latest_returns,
+            latest_macro.flatten()[:6] if len(latest_macro) > 0 else np.zeros(6),
+            agent.primary_window
+        )
+        
+        result = agent.select_action(state, explore=False)
+        
+        obs = np.concatenate([
+            returns[-1:],
+            latest_macro.flatten()[:9] if len(latest_macro) > 0 else np.zeros(9)
+        ])
+        surprise = agent.compute_surprise(obs[:agent.obs_dim])
+        
+        window_signals = []
+        if "window_results" in result:
+            for wr in result["window_results"]:
+                window_signals.append({
+                    "window": wr["window"],
+                    "free_energy": wr["free_energy"],
+                    "surprise": wr["surprise"],
+                    "epistemic": wr["epistemic"],
+                    "action": wr["action_label"]
+                })
+        
+        return {
+            "action": result["action_label"],
+            "action_index": result["action"],
+            "free_energy": result["free_energy"],
+            "surprise": surprise,
+            "epistemic": result["epistemic"],
+            "position": result["position"],
+            "action_probabilities": result["action_probabilities"],
+            "window_signals": window_signals,
+            "weights": result.get("weights", {}),
+            "pragmatic_value": result.get("pragmatic_value", 0),
+            "epistemic_value": result.get("epistemic_value", 0),
+            "kl_div": result.get("kl_div", 0),
+            "error": None
+        }
     except Exception as e:
         return {
             "action": "HOLD",
@@ -418,6 +420,15 @@ def compute_agent_signal(
             "window_signals": [],
             "error": str(e)
         }
+
+
+def compute_agent_signal(
+    prices: pd.Series,
+    macro_df: pd.DataFrame,
+    agent_config: Dict
+) -> Dict:
+    """Wrapper for FEP signal computation."""
+    return compute_fep_signals(prices, macro_df, agent_config, train_agent=True)
 
 
 def compute_cross_sectional_zscore(scores: Dict[str, float]) -> Dict[str, float]:
