@@ -58,10 +58,13 @@ class GenerativeModel:
         
         prediction = self.transition_mean @ combined
         error = next_state - prediction
+        # Clip error to prevent explosion
+        error = np.clip(error, -10, 10)
         self.transition_mean += learning_rate * np.outer(error, combined)
         
         obs_pred = self.obs_mean @ state
         obs_error = observation - obs_pred
+        obs_error = np.clip(obs_error, -10, 10)
         self.obs_mean += learning_rate * np.outer(obs_error, state)
         self.steps += 1
 
@@ -212,20 +215,37 @@ class MultiWindowFEPAgent:
         ensemble = self.ensembles[window]
         next_mean, next_var = ensemble.predict(state, action)
         
-        surprise = 0.5 * np.sum((next_mean - state) ** 2 / (next_var + 1e-6))
+        # Clip next_mean and state to prevent explosion
+        next_mean = np.clip(next_mean, -10, 10)
+        state_clipped = np.clip(state, -10, 10)
+        
+        # Compute surprise with clipping
+        diff = (next_mean - state_clipped) ** 2
+        denom = (next_var + 1e-6)
+        surprise = 0.5 * np.sum(diff / denom)
+        # Clip surprise to prevent explosion
+        surprise = np.clip(surprise, 0, 100)
+        
+        # Epistemic value
         epistemic = np.mean(next_var) / (np.mean(next_var) + 1e-6)
         epistemic = np.clip(epistemic, 0, 1)
         
+        # KL divergence (simplified and clipped)
         prior_mean = ensemble.models[0].prior_mean
         prior_cov_diag = ensemble.models[0].prior_cov.diagonal() + 1e-6
         kl_div = 0.5 * np.sum((next_mean - prior_mean) ** 2 / prior_cov_diag)
+        kl_div = np.clip(kl_div, 0, 100)
         
         pragmatic_value = -surprise
         epistemic_value = epistemic * self.lambda_epistemic
         
+        # Free energy: lower is better
         free_energy = (self.lambda_pragmatic * pragmatic_value + 
                        self.lambda_epistemic * epistemic_value -
                        self.beta * kl_div)
+        
+        # Clip final free energy to a reasonable range
+        free_energy = np.clip(free_energy, -10, 10)
         
         return {
             "free_energy": free_energy,
@@ -245,6 +265,7 @@ class MultiWindowFEPAgent:
             result = self.compute_free_energy_for_window(state, action, window)
             results.append(result)
         
+        # Weight windows
         weights = {}
         for w in self.windows:
             if w == self.primary_window:
@@ -255,6 +276,11 @@ class MultiWindowFEPAgent:
         agg_free_energy = sum(r["free_energy"] * weights[r["window"]] for r in results)
         agg_surprise = sum(r["surprise"] * weights[r["window"]] for r in results)
         agg_epistemic = sum(r["epistemic"] * weights[r["window"]] for r in results)
+        
+        # Clip aggregate values
+        agg_free_energy = np.clip(agg_free_energy, -10, 10)
+        agg_surprise = np.clip(agg_surprise, 0, 100)
+        agg_epistemic = np.clip(agg_epistemic, 0, 1)
         
         return {
             "free_energy": agg_free_energy,
@@ -274,6 +300,7 @@ class MultiWindowFEPAgent:
         
         fe_values = np.array([a["free_energy"] for a in action_values])
         
+        # Softmax with numerical stability
         fe_values_shifted = fe_values - np.max(fe_values)
         if explore:
             exp_vals = np.exp(self.beta * fe_values_shifted)
@@ -284,6 +311,7 @@ class MultiWindowFEPAgent:
         
         selected_action = np.random.choice(self.n_actions, p=probs)
         
+        # Position limits
         if self.position >= self.max_position * 0.9 and selected_action == 0:
             selected_action = 1
         if self.position <= -self.max_position * 0.9 and selected_action == 2:
@@ -300,6 +328,7 @@ class MultiWindowFEPAgent:
         return result
     
     def compute_surprise(self, observation: np.ndarray) -> float:
+        """Compute surprise with numerical stability."""
         if self.position == 0:
             state = np.zeros(self.state_dim)
         else:
@@ -311,8 +340,11 @@ class MultiWindowFEPAgent:
                 mean, cov = ensemble.predict_observation(state)
                 cov_reg = cov + np.eye(len(mean)) * 1e-4
                 diff = observation[:len(mean)] - mean[:len(mean)]
+                # Clip diff to prevent explosion
+                diff = np.clip(diff, -10, 10)
                 inv_cov = np.linalg.pinv(cov_reg)
                 surprise = diff @ inv_cov @ diff
+                surprise = np.clip(surprise, 0, 100)
                 surprises.append(surprise)
             except Exception:
                 surprises.append(1.0)
@@ -389,7 +421,7 @@ def compute_fep_signals(
             "pragmatic_value": result.get("pragmatic_value", 0),
             "epistemic_value": result.get("epistemic_value", 0),
             "kl_div": result.get("kl_div", 0),
-            "error": None  # No error
+            "error": None
         }
     except Exception as e:
         import traceback
