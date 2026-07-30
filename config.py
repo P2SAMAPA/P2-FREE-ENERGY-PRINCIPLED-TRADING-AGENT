@@ -1,14 +1,6 @@
 """
-config.py  —  Configuration for Free Energy-Principled Agent
-=============================================================
-
-Defines:
-  - UNIVERSES: ETF ticker sets
-  - GENERATIVE_MODEL: model architecture parameters
-  - FREE_ENERGY: variational free energy parameters
-  - ACTION_SPACE: trading action constraints
-  - EPISTEMIC_DRIVE: exploration parameters
-  - WINDOWS: training and prediction windows
+config.py  —  Configuration for Free Energy-Principled Agent (Proper Implementation)
+====================================================================================
 """
 
 # ── HuggingFace ──────────────────────────────────────────────────────────────
@@ -40,7 +32,6 @@ UNIVERSES = {
 
 # ── Windows ──────────────────────────────────────────────────────────────────
 
-# Training windows for the generative model
 WINDOWS = [63, 252, 504, 1008, 2016, 4032, 4536]
 WINDOW_LABELS = {
     63: "63d  (~3 months) — Short-term",
@@ -52,20 +43,17 @@ WINDOW_LABELS = {
     4536: "4536d (~18 years) — Full History",
 }
 
-# Primary window for trading decisions
 PRIMARY_WINDOW = 252
-
-# Prediction horizon (steps ahead)
-PREDICTION_HORIZONS = [1, 5, 21]  # 1 day, 1 week, 1 month
+PREDICTION_HORIZONS = [1, 5, 21]
 
 
 # ── Generative Model ─────────────────────────────────────────────────────────
 
 GENERATIVE_MODEL = {
-    "state_dim": 16,           # Latent state dimension
-    "observation_dim": 10,     # Market features (returns, volume, macro)
+    "state_dim": 32,           # Latent state dimension (increased for complexity)
+    "observation_dim": 16,     # Market features (returns, volume, macro)
     "action_dim": 3,           # {BUY, HOLD, SELL}
-    "hidden_dim": 64,          # Neural network hidden size
+    "hidden_dim": 128,         # Neural network hidden size (increased)
     "learning_rate": 0.001,    # Online learning rate
     "memory_size": 1000,       # Experience replay buffer
 }
@@ -76,9 +64,8 @@ GENERATIVE_MODEL = {
 FREE_ENERGY = {
     "beta": 1.0,               # Temperature parameter for action selection
     "gamma": 0.99,             # Discount factor for future free energy
-    "lambda_epistemic": 0.3,   # Weight for epistemic drive (exploration) - REDUCED
-    "lambda_pragmatic": 0.7,   # Weight for pragmatic drive (exploitation) - INCREASED
-    "lambda_momentum": 0.3,    # NEW: Weight for momentum signal
+    "lambda_epistemic": 0.4,   # Weight for epistemic drive (exploration)
+    "lambda_pragmatic": 0.6,   # Weight for pragmatic drive (exploitation)
     "surprise_threshold": 2.0, # Threshold for anomalous observations
 }
 
@@ -86,34 +73,24 @@ FREE_ENERGY = {
 # ── Action Space ─────────────────────────────────────────────────────────────
 
 ACTION_SPACE = {
-    "action_type": "discrete",  # discrete or continuous
-    "n_actions": 3,            # BUY, HOLD, SELL
-    "position_limits": [-1.0, 1.0],  # Min/max portfolio weight
-    "max_trade_size": 0.1,      # Maximum fraction of portfolio to trade
-    "transaction_cost": 0.001,  # 10bps per trade
+    "action_type": "discrete",
+    "n_actions": 3,
+    "position_limits": [-1.0, 1.0],
+    "max_trade_size": 0.1,
+    "transaction_cost": 0.001,
 }
 
 
 # ── Epistemic Drive ──────────────────────────────────────────────────────────
 
 EPISTEMIC_DRIVE = {
-    "uncertainty_measure": "ensemble_variance",  # or "entropy"
-    "ensemble_size": 3,          # Reduced from 5 for speed
-    "exploration_bonus": 0.1,    # Bonus for high-uncertainty actions
-    "decay_rate": 0.99,          # Exploration decay over time
+    "uncertainty_measure": "ensemble_variance",
+    "ensemble_size": 3,
+    "exploration_bonus": 0.1,
+    "decay_rate": 0.99,
 }
 
-# Add to config.py for better signal differentiation:
 
-# ── Action Scoring ──────────────────────────────────────────────────────────
-
-ACTION_SCORES = {
-    "STRONG BUY": 1.5,
-    "BUY": 1.0,
-    "HOLD": 0.0,
-    "REDUCE": -0.5,
-    "STRONG SELL": -1.0,
-}
 # ── Macro Signals ────────────────────────────────────────────────────────────
 
 MACRO_SIGNALS = [
