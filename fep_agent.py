@@ -124,11 +124,6 @@ class RecognitionModel(nn.Module):
 class FEPAgent:
     """
     Free Energy-Principled Agent with Deep Generative Model.
-    
-    Implements:
-    - Variational free energy minimization
-    - Expected free energy action selection
-    - Epistemic (exploration) and pragmatic (exploitation) drives
     """
     
     def __init__(self, config: Dict):
@@ -144,10 +139,10 @@ class FEPAgent:
         
         # Learning parameters
         self.learning_rate = config.get("learning_rate", 0.001)
-        self.beta = config.get("beta", 1.0)  # Temperature
-        self.gamma = config.get("gamma", 0.99)  # Discount factor
-        self.lambda_epistemic = config.get("lambda_epistemic", 0.5)
-        self.lambda_pragmatic = config.get("lambda_pragmatic", 0.5)
+        self.beta = config.get("beta", 1.0)
+        self.gamma = config.get("gamma", 0.99)
+        self.lambda_epistemic = config.get("lambda_epistemic", 0.4)
+        self.lambda_pragmatic = config.get("lambda_pragmatic", 0.6)
         
         # Initialize models
         self.generative_model = GenerativeModel(
@@ -177,12 +172,14 @@ class FEPAgent:
         self.position = 0.0
         self.max_position = 1.0
         
-        # Memory buffer for online learning
+        # Memory buffer
         self.memory = []
         self.memory_size = config.get("memory_size", 1000)
-        
-        # Training counter
         self.training_steps = 0
+        
+        # Set models to eval mode initially
+        self.generative_model.eval()
+        self.recognition_model.eval()
         
     def reset_belief(self):
         """Reset the agent's belief state."""
@@ -192,7 +189,6 @@ class FEPAgent:
         
     def encode_observation(self, returns: np.ndarray, macro: np.ndarray) -> torch.Tensor:
         """Encode market data into observation tensor."""
-        # Aggregate features
         features = []
         
         # Return features
@@ -201,8 +197,8 @@ class FEPAgent:
             features.extend([
                 np.mean(recent),
                 np.std(recent),
-                np.percentile(recent, 25),
-                np.percentile(recent, 75),
+                np.percentile(recent, 25) if len(recent) > 1 else 0,
+                np.percentile(recent, 75) if len(recent) > 1 else 0,
                 recent[-1] if len(recent) > 0 else 0,
                 np.mean(recent[-5:]) if len(recent) >= 5 else 0,
                 np.mean(recent[-10:]) if len(recent) >= 10 else 0,
@@ -246,7 +242,6 @@ class FEPAgent:
         prior_std = torch.exp(0.5 * prior_log_var)
         
         # KL divergence: KL[q(s) || p(s)]
-        # Analytical KL for Gaussians
         kl_div = torch.sum(
             prior_log_var - post_log_var + 
             (post_std**2 + (post_mean - prior_mean)**2) / (prior_std**2 + 1e-8) - 1
@@ -256,43 +251,38 @@ class FEPAgent:
         obs_mean, obs_log_var = self.generative_model.observation(state)
         obs_std = torch.exp(0.5 * obs_log_var)
         
-        # Negative log-likelihood (simplified)
+        # Negative log-likelihood
         nll = torch.sum(
             (obs - obs_mean)**2 / (2 * obs_std**2 + 1e-8) + 
             0.5 * torch.log(obs_std**2 + 1e-8)
         )
         
-        # Variational free energy
+        # Variational free energy (tensor)
         free_energy = kl_div + nll
         
         return {
-            "free_energy": free_energy.item(),
-            "kl_div": kl_div.item(),
-            "nll": nll.item(),
-            "post_mean": post_mean.detach().numpy(),
-            "post_log_var": post_log_var.detach().numpy(),
-            "state": state.detach().numpy()
+            "free_energy": free_energy,  # Keep as tensor
+            "kl_div": kl_div,
+            "nll": nll,
+            "post_mean": post_mean.detach(),
+            "post_log_var": post_log_var.detach(),
+            "state": state.detach()
         }
     
     def compute_expected_free_energy(self, obs: torch.Tensor, state: torch.Tensor, 
                                       action: torch.Tensor) -> Dict:
-        """
-        Compute expected free energy for action selection.
-        
-        G = E[F] = pragmatic_value + epistemic_value
-        """
+        """Compute expected free energy for action selection."""
         # Generate imaginary future
         next_mean, next_log_var, obs_mean, obs_log_var = self.generative_model(state, action)
         
         # Epistemic value: expected reduction in uncertainty
-        # Higher uncertainty = higher epistemic value (exploration)
         epistemic_value = torch.exp(0.5 * next_log_var).mean().item()
-        epistemic_value = min(1.0, epistemic_value)
+        epistemic_value = min(1.0, max(0.0, epistemic_value))
         
         # Pragmatic value: expected reward (negative surprise)
-        # Lower surprise = higher pragmatic value (exploitation)
         surprise = torch.sum(
             (obs - obs_mean)**2 / (2 * torch.exp(obs_log_var) + 1e-8)
+            + 0.5 * torch.log(obs_log_var.exp() + 1e-8)
         ).item()
         pragmatic_value = -surprise
         
@@ -320,7 +310,6 @@ class FEPAgent:
             action_tensor = torch.zeros(self.action_dim)
             action_tensor[action_idx] = 1.0
             
-            # Compute expected free energy for this action
             result = self.compute_expected_free_energy(
                 obs, 
                 self.belief_mean,
@@ -333,13 +322,11 @@ class FEPAgent:
         # Convert to array
         e_fe_values = np.array([r["expected_free_energy"] for r in action_results])
         
-        # Softmax for action probabilities (lower expected free energy = better)
+        # Softmax for action probabilities
         if explore:
-            # Exploration: softmax with temperature
             e_fe_shifted = e_fe_values - np.max(e_fe_values)
-            probs = np.exp(self.beta * e_fe_shifted) / np.sum(np.exp(self.beta * e_fe_shifted) + 1e-8)
+            probs = np.exp(self.beta * e_fe_shifted) / (np.sum(np.exp(self.beta * e_fe_shifted)) + 1e-8)
         else:
-            # Exploitation: greedy
             probs = np.zeros(self.n_actions)
             probs[np.argmax(e_fe_values)] = 1.0
         
@@ -347,9 +334,9 @@ class FEPAgent:
         selected_idx = np.random.choice(self.n_actions, p=probs)
         
         # Position limits
-        if self.position >= self.max_position * 0.9 and selected_idx == 0:  # BUY
+        if self.position >= self.max_position * 0.9 and selected_idx == 0:
             selected_idx = 1
-        if self.position <= -self.max_position * 0.9 and selected_idx == 2:  # SELL
+        if self.position <= -self.max_position * 0.9 and selected_idx == 2:
             selected_idx = 1
         
         # Update position
@@ -362,7 +349,6 @@ class FEPAgent:
         result["action_probabilities"] = probs.tolist()
         result["action_index"] = selected_idx
         
-        # Store action for learning
         self.current_action = selected_idx
         
         return result
@@ -372,27 +358,29 @@ class FEPAgent:
         if self.belief_mean is None:
             self.reset_belief()
         
-        # Compute posterior
-        post_mean, post_log_var = self.recognition_model(
-            obs, 
-            self.belief_mean,
-            action
-        )
-        
-        # Update belief
-        self.belief_mean = post_mean.detach()
-        self.belief_log_var = post_log_var.detach()
-        
-        # Sample new state
-        std = torch.exp(0.5 * self.belief_log_var)
-        eps = torch.randn_like(std)
-        self.current_state = self.belief_mean + eps * std
+        with torch.no_grad():
+            post_mean, post_log_var = self.recognition_model(
+                obs, 
+                self.belief_mean,
+                action
+            )
+            
+            # Update belief
+            self.belief_mean = post_mean.detach()
+            self.belief_log_var = post_log_var.detach()
+            
+            # Sample new state
+            std = torch.exp(0.5 * self.belief_log_var)
+            eps = torch.randn_like(std)
+            self.current_state = self.belief_mean + eps * std
     
     def learn(self, obs: torch.Tensor, action: torch.Tensor, next_obs: torch.Tensor,
               reward: float = 0.0):
-        """
-        Online learning step using variational free energy minimization.
-        """
+        """Online learning step using variational free energy minimization."""
+        # Set models to train mode
+        self.generative_model.train()
+        self.recognition_model.train()
+        
         # Prepare action tensor
         action_tensor = torch.zeros(self.action_dim)
         if isinstance(action, int):
@@ -422,6 +410,10 @@ class FEPAgent:
         self.gen_optimizer.step()
         self.rec_optimizer.step()
         
+        # Set back to eval mode for inference
+        self.generative_model.eval()
+        self.recognition_model.eval()
+        
         # Update belief
         self.update_belief(obs, action_tensor)
         
@@ -433,17 +425,26 @@ class FEPAgent:
             "action": action_tensor.detach().numpy(),
             "next_obs": next_obs.detach().numpy(),
             "reward": reward,
-            "fe": fe_result["free_energy"]
+            "fe": fe_result["free_energy"].item()
         })
         
         self.training_steps += 1
         
-        return fe_result
+        return {
+            "free_energy": fe_result["free_energy"].item(),
+            "kl_div": fe_result["kl_div"].item(),
+            "nll": fe_result["nll"].item(),
+            "loss": loss.item()
+        }
     
     def batch_learn(self, batch_size: int = 32):
         """Batch learning from memory."""
         if len(self.memory) < batch_size:
             return
+        
+        # Set models to train mode
+        self.generative_model.train()
+        self.recognition_model.train()
         
         # Sample batch
         indices = np.random.choice(len(self.memory), batch_size, replace=False)
@@ -456,11 +457,14 @@ class FEPAgent:
             next_obs = torch.tensor(item["next_obs"], dtype=torch.float32)
             reward = item["reward"]
             
+            # Use current belief as prev_state (simplified)
+            prev_state = self.belief_mean if self.belief_mean is not None else torch.zeros(self.state_dim)
+            
             # Compute free energy
-            fe_result = self.compute_variational_free_energy(obs, self.belief_mean, action)
+            fe_result = self.compute_variational_free_energy(obs, prev_state, action)
             loss = fe_result["free_energy"] - reward
             
-            total_loss += loss
+            total_loss = total_loss + loss
         
         # Average loss
         avg_loss = total_loss / batch_size
@@ -473,6 +477,12 @@ class FEPAgent:
         torch.nn.utils.clip_grad_norm_(self.recognition_model.parameters(), 1.0)
         self.gen_optimizer.step()
         self.rec_optimizer.step()
+        
+        # Set back to eval mode
+        self.generative_model.eval()
+        self.recognition_model.eval()
+        
+        return avg_loss.item()
 
 
 # ── Wrapper Functions ─────────────────────────────────────────────────────────
@@ -483,9 +493,7 @@ def compute_fep_signals(
     config: Dict,
     train_agent: bool = True
 ) -> Dict:
-    """
-    Compute Free Energy-Principled signals for a single ticker.
-    """
+    """Compute Free Energy-Principled signals for a single ticker."""
     # Prepare data
     returns = np.log(prices / prices.shift(1)).dropna().values
     macro = macro_df.values
@@ -505,6 +513,7 @@ def compute_fep_signals(
     try:
         # Initialize agent
         agent = FEPAgent(config)
+        agent.reset_belief()
         
         # Training phase
         if train_agent:
@@ -546,32 +555,33 @@ def compute_fep_signals(
         surprise = result.get("surprise", 0.0)
         
         # Get free energy from the agent's belief
-        if agent.belief_mean is not None:
-            free_energy = agent.compute_variational_free_energy(
-                obs,
-                agent.belief_mean,
-                torch.zeros(agent.action_dim)
-            )["free_energy"]
-        else:
-            free_energy = 0.0
+        with torch.no_grad():
+            if agent.belief_mean is not None:
+                fe_result = agent.compute_variational_free_energy(
+                    obs,
+                    agent.belief_mean,
+                    torch.zeros(agent.action_dim)
+                )
+                free_energy = fe_result["free_energy"].item()
+            else:
+                free_energy = 0.0
         
-        # Window-specific signals (for breakdown)
+        # Window-specific signals
         window_signals = []
         for window in config.get("windows", [63, 252, 504, 1008]):
-            # Quick approximation for each window
             window_returns = returns[-min(window, len(returns)):]
             window_macro = macro[-min(5, len(macro)):] if len(macro) > 0 else np.zeros((1, 6))
             window_obs = agent.encode_observation(window_returns, window_macro)
             
-            # Compute rough free energy for this window
-            if agent.belief_mean is not None:
-                fe = agent.compute_variational_free_energy(
-                    window_obs,
-                    agent.belief_mean,
-                    torch.zeros(agent.action_dim)
-                )["free_energy"]
-            else:
-                fe = 0.0
+            with torch.no_grad():
+                if agent.belief_mean is not None:
+                    fe = agent.compute_variational_free_energy(
+                        window_obs,
+                        agent.belief_mean,
+                        torch.zeros(agent.action_dim)
+                    )["free_energy"].item()
+                else:
+                    fe = 0.0
             
             window_signals.append({
                 "window": window,
