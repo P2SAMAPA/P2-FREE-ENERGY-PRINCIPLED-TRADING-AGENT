@@ -74,6 +74,12 @@ def run_trainer(hf_token: Optional[str] = None) -> Dict:
         "universes": {}
     }
 
+    # ── Collect all signals across all universes for global z-score ──────────
+    all_signals = {}  # ticker -> signal_value
+
+    # ── Store per-ticker results across all universes ────────────────────────
+    all_ticker_data = {}  # ticker -> {action, free_energy, surprise, epistemic, position, window_signals}
+
     # ── Process each universe ─────────────────────────────────────────────────
     for universe_name, tickers in config.UNIVERSES.items():
         logger.info(f"\n🧠 Processing universe: {universe_name}")
@@ -86,14 +92,8 @@ def run_trainer(hf_token: Optional[str] = None) -> Dict:
             logger.warning(f"   No tickers available for {universe_name}")
             continue
 
-        # Store results
-        ticker_actions = {}
-        ticker_free_energy = {}
-        ticker_surprise = {}
-        ticker_epistemic = {}
-        ticker_position = {}
-        ticker_signal = {}
-        ticker_window_signals = {}
+        # Store results for this universe
+        universe_ticker_data = {}
 
         # ── Compute for each ticker ────────────────────────────────────────────
         for ticker in available:
@@ -103,116 +103,134 @@ def run_trainer(hf_token: Optional[str] = None) -> Dict:
             try:
                 result = compute_agent_signal(prices, macro_df, agent_config)
                 
-                # Check for errors properly
+                # Check for errors
                 error = result.get("error")
                 if error is not None and str(error) != "None" and str(error) != "":
                     logger.warning(f"      {ticker}: Error - {error}")
                     continue
                 
-                # Check if we have a valid action
+                # Get values
                 action = result.get("action", "HOLD")
                 if action == "INSUFFICIENT DATA":
                     logger.warning(f"      {ticker}: Insufficient data")
                     continue
                 
-                # Get free energy value
-                free_energy = result.get("free_energy", 0)
-                if free_energy is None:
-                    free_energy = 0
+                free_energy = safe_float(result.get("free_energy", 0))
+                surprise = safe_float(result.get("surprise", 0))
+                epistemic = safe_float(result.get("epistemic", 0))
+                position = safe_float(result.get("position", 0))
+                window_signals = result.get("window_signals", [])
                 
                 # Map action to numeric for scoring
-                action_map = {"BUY": 1.0, "HOLD": 0.0, "SELL": -1.0}
+                action_map = {"STRONG BUY": 1.5, "BUY": 1.0, "HOLD": 0.0, "REDUCE": -0.5, "STRONG SELL": -1.0}
                 signal_value = action_map.get(action, 0.0)
                 
-                ticker_actions[ticker] = action
-                ticker_free_energy[ticker] = float(free_energy)
-                ticker_surprise[ticker] = float(result.get("surprise", 0) or 0)
-                ticker_epistemic[ticker] = float(result.get("epistemic", 0) or 0)
-                ticker_position[ticker] = float(result.get("position", 0) or 0)
-                ticker_signal[ticker] = float(signal_value)
-                ticker_window_signals[ticker] = result.get("window_signals", [])
+                # Store in all signals for global z-score
+                all_signals[ticker] = signal_value
                 
-                logger.info(f"      {ticker}: {action} | F={free_energy:.3f}")
+                # Store full data
+                all_ticker_data[ticker] = {
+                    "action": action,
+                    "free_energy": free_energy,
+                    "surprise": surprise,
+                    "epistemic": epistemic,
+                    "position": position,
+                    "window_signals": window_signals,
+                    "universe": universe_name,
+                    "signal": signal_value
+                }
+                
+                universe_ticker_data[ticker] = {
+                    "action": action,
+                    "free_energy": free_energy,
+                    "surprise": surprise,
+                    "epistemic": epistemic,
+                    "position": position,
+                    "window_signals": window_signals,
+                    "signal": signal_value
+                }
+                
+                logger.info(f"      {ticker}: {action} | F={free_energy:.3f} | Signal={signal_value:.2f}")
                 
             except Exception as e:
                 logger.error(f"      {ticker}: Exception - {str(e)}")
                 continue
 
-        # ── Cross-sectional z-scores ──────────────────────────────────────────
-        if ticker_signal:
-            z_scores = compute_cross_sectional_zscore(ticker_signal)
+    # ── Compute GLOBAL z-scores across all tickers ──────────────────────────
+    logger.info("\n📊 Computing global z-scores across all tickers...")
+    global_z_scores = compute_cross_sectional_zscore(all_signals)
+    
+    # ── Build results by universe ────────────────────────────────────────────
+    for universe_name, tickers in config.UNIVERSES.items():
+        # Get tickers in this universe that have data
+        universe_tickers = [t for t in tickers if t in all_ticker_data]
+        
+        if not universe_tickers:
+            continue
+        
+        # Build full scores with global z-scores
+        full_scores = {}
+        signal_values = {}
+        
+        for ticker in universe_tickers:
+            data = all_ticker_data[ticker]
+            z_score = global_z_scores.get(ticker, 0.0)
+            signal_values[ticker] = z_score
             
-            # Determine action based on z-score
-            actions = {}
-            for ticker, z in z_scores.items():
-                if z > 0.5:
-                    actions[ticker] = "STRONG BUY"
-                elif z > 0.2:
-                    actions[ticker] = "BUY"
-                elif z > -0.2:
-                    actions[ticker] = "HOLD"
-                elif z > -0.5:
-                    actions[ticker] = "REDUCE"
-                else:
-                    actions[ticker] = "STRONG SELL"
-            
-            # Top 5 buys (highest z-score)
-            top_buys = sorted(
-                [(t, z_scores[t]) for t in z_scores if not np.isnan(z_scores[t])],
-                key=lambda x: x[1],
-                reverse=True
-            )[:5]
-            
-            # Top 5 sells (lowest z-score)
-            top_sells = sorted(
-                [(t, z_scores[t]) for t in z_scores if not np.isnan(z_scores[t])],
-                key=lambda x: x[1]
-            )[:5]
-            
-            # Build Tab 1
-            results_tab1["universes"][universe_name] = {
-                "top_buys": [
-                    {"ticker": t, "z_score": z} for t, z in top_buys
-                ],
-                "top_sells": [
-                    {"ticker": t, "z_score": z} for t, z in top_sells
-                ],
-                "full_scores": {
-                    t: {
-                        "z_score": z_scores.get(t, 0),
-                        "action": actions.get(t, "HOLD"),
-                        "free_energy": ticker_free_energy.get(t, 0),
-                        "surprise": ticker_surprise.get(t, 0),
-                        "epistemic": ticker_epistemic.get(t, 0),
-                        "position": ticker_position.get(t, 0),
-                        "signal": ticker_signal.get(t, 0),
-                        "window_signals": ticker_window_signals.get(t, [])
-                    }
-                    for t in ticker_signal.keys()
+            full_scores[ticker] = {
+                "z_score": z_score,
+                "action": data["action"],
+                "free_energy": data["free_energy"],
+                "surprise": data["surprise"],
+                "epistemic": data["epistemic"],
+                "position": data["position"],
+                "signal": data["signal"],
+                "window_signals": data.get("window_signals", [])
+            }
+        
+        # Top 5 buys (highest z-score)
+        top_buys = sorted(
+            [(t, full_scores[t]["z_score"]) for t in full_scores if not np.isnan(full_scores[t]["z_score"])],
+            key=lambda x: x[1],
+            reverse=True
+        )[:5]
+        
+        # Top 5 sells (lowest z-score)
+        top_sells = sorted(
+            [(t, full_scores[t]["z_score"]) for t in full_scores if not np.isnan(full_scores[t]["z_score"])],
+            key=lambda x: x[1]
+        )[:5]
+        
+        # Build Tab 1
+        results_tab1["universes"][universe_name] = {
+            "top_buys": [
+                {"ticker": t, "z_score": z} for t, z in top_buys
+            ],
+            "top_sells": [
+                {"ticker": t, "z_score": z} for t, z in top_sells
+            ],
+            "full_scores": full_scores
+        }
+        
+        # Build Tab 2
+        results_tab2["universes"][universe_name] = {
+            "full_ranking": [
+                {
+                    "ticker": t,
+                    "z_score": full_scores[t]["z_score"],
+                    "action": full_scores[t]["action"],
+                    "free_energy": full_scores[t]["free_energy"],
+                    "surprise": full_scores[t]["surprise"],
+                    "epistemic": full_scores[t]["epistemic"],
+                    "position": full_scores[t]["position"],
+                    "signal": full_scores[t]["signal"],
+                    "window_signals": full_scores[t].get("window_signals", [])
                 }
-            }
-            
-            # Build Tab 2
-            results_tab2["universes"][universe_name] = {
-                "full_ranking": [
-                    {
-                        "ticker": t,
-                        "z_score": z_scores.get(t, 0),
-                        "action": actions.get(t, "HOLD"),
-                        "free_energy": ticker_free_energy.get(t, 0),
-                        "surprise": ticker_surprise.get(t, 0),
-                        "epistemic": ticker_epistemic.get(t, 0),
-                        "position": ticker_position.get(t, 0),
-                        "signal": ticker_signal.get(t, 0),
-                        "window_signals": ticker_window_signals.get(t, [])
-                    }
-                    for t in ticker_signal.keys()
-                ]
-            }
-            
-            logger.info(f"   ✅ {universe_name}: {len(ticker_signal)} tickers processed")
-        else:
-            logger.warning(f"   ⚠️ No signals generated for {universe_name}")
+                for t in full_scores.keys()
+            ]
+        }
+        
+        logger.info(f"   ✅ {universe_name}: {len(full_scores)} tickers processed")
 
     # ── Save JSON files ──────────────────────────────────────────────────────
     logger.info("\n💾 Saving JSON results...")
@@ -240,6 +258,19 @@ def run_trainer(hf_token: Optional[str] = None) -> Dict:
         logger.info("\n📤 Skipping upload (no HF_TOKEN)")
 
     return {"tab1": results_tab1, "tab2": results_tab2}
+
+
+def safe_float(val, default=0.0):
+    """Safely convert to float."""
+    if val is None:
+        return default
+    try:
+        f = float(val)
+        if np.isnan(f):
+            return default
+        return f
+    except (ValueError, TypeError):
+        return default
 
 
 if __name__ == "__main__":
