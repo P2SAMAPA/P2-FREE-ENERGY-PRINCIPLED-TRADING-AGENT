@@ -8,6 +8,7 @@ Defines:
   - FREE_ENERGY: variational free energy parameters
   - ACTION_SPACE: trading action constraints
   - EPISTEMIC_DRIVE: exploration parameters
+  - WINDOWS: training and prediction windows
 """
 
 # ── HuggingFace ──────────────────────────────────────────────────────────────
@@ -37,16 +38,36 @@ UNIVERSES = {
 }
 
 
+# ── Windows ──────────────────────────────────────────────────────────────────
+
+# Training windows for the generative model
+WINDOWS = [63, 252, 504, 1008, 2016, 4032, 4536]
+WINDOW_LABELS = {
+    63: "63d  (~3 months) — Short-term",
+    252: "252d (~1 year) — Core Signal",
+    504: "504d (~2 years) — Medium-term",
+    1008: "1008d (~4 years) — Structural",
+    2016: "2016d (~8 years) — Secular",
+    4032: "4032d (~16 years) — Long-term",
+    4536: "4536d (~18 years) — Full History",
+}
+
+# Primary window for trading decisions
+PRIMARY_WINDOW = 252
+
+# Prediction horizon (steps ahead)
+PREDICTION_HORIZONS = [1, 5, 21]  # 1 day, 1 week, 1 month
+
+
 # ── Generative Model ─────────────────────────────────────────────────────────
 
 GENERATIVE_MODEL = {
     "state_dim": 16,           # Latent state dimension
     "observation_dim": 10,     # Market features (returns, volume, macro)
-    "action_dim": 3,           # {BUY, HOLD, SELL} or continuous
+    "action_dim": 3,           # {BUY, HOLD, SELL}
     "hidden_dim": 64,          # Neural network hidden size
     "learning_rate": 0.001,    # Online learning rate
     "memory_size": 1000,       # Experience replay buffer
-    "prediction_horizon": 5,   # Steps ahead to predict
 }
 
 
