@@ -76,8 +76,9 @@ GENERATIVE_MODEL = {
 FREE_ENERGY = {
     "beta": 1.0,               # Temperature parameter for action selection
     "gamma": 0.99,             # Discount factor for future free energy
-    "lambda_epistemic": 0.5,   # Weight for epistemic drive (exploration)
-    "lambda_pragmatic": 0.5,   # Weight for pragmatic drive (exploitation)
+    "lambda_epistemic": 0.3,   # Weight for epistemic drive (exploration) - REDUCED
+    "lambda_pragmatic": 0.7,   # Weight for pragmatic drive (exploitation) - INCREASED
+    "lambda_momentum": 0.3,    # NEW: Weight for momentum signal
     "surprise_threshold": 2.0, # Threshold for anomalous observations
 }
 
@@ -97,7 +98,7 @@ ACTION_SPACE = {
 
 EPISTEMIC_DRIVE = {
     "uncertainty_measure": "ensemble_variance",  # or "entropy"
-    "ensemble_size": 5,          # Number of models in ensemble
+    "ensemble_size": 3,          # Reduced from 5 for speed
     "exploration_bonus": 0.1,    # Bonus for high-uncertainty actions
     "decay_rate": 0.99,          # Exploration decay over time
 }
