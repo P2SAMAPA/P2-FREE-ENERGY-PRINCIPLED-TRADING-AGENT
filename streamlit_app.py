@@ -24,9 +24,9 @@ st.markdown("""
 .hold-card{background:linear-gradient(135deg,#2c3e50 0%,#4a5d6a 60%,#5d7a8a 100%);
            color:white;border-radius:16px;padding:1.2rem;margin:0.4rem;text-align:center;
            box-shadow:0 6px 20px rgba(44,62,80,0.3)}
-.agent-card{background:linear-gradient(135deg,#1a1a2e 0%,#2d1b69 60%,#4a2c8a 100%);
-            color:white;border-radius:16px;padding:1.2rem;margin:0.4rem;text-align:center;
-            box-shadow:0 6px 20px rgba(142,68,173,0.4)}
+.top-card{background:linear-gradient(135deg,#0d47a1 0%,#1565c0 60%,#1e88e5 100%);
+          color:white;border-radius:16px;padding:1.2rem;margin:0.4rem;text-align:center;
+          box-shadow:0 6px 20px rgba(21,101,192,0.4)}
 .ticker{font-size:1.6rem;font-weight:800;letter-spacing:1px}
 .score{font-size:0.9rem;margin-top:0.3rem;opacity:0.85}
 .next-day{font-size:0.8rem;margin-top:0.2rem;opacity:0.7}
@@ -36,12 +36,8 @@ st.markdown("""
             font-weight:700;color:white}
 .badge-hold{background:#f39c12;border-radius:6px;padding:2px 12px;font-size:0.75rem;
             font-weight:700;color:white}
-.metric-box{background:#f8f9fa;border-radius:10px;padding:0.8rem;margin:0.3rem 0;
-            border-left:4px solid #8e44ad}
-.metric-label{font-size:0.75rem;color:#666;text-transform:uppercase;letter-spacing:0.5px}
-.metric-value{font-size:1.1rem;font-weight:700;color:#1a1a2e}
-.window-badge{background:#8e44ad;border-radius:12px;padding:2px 10px;font-size:0.65rem;
-              color:white;font-weight:600}
+.badge-top{background:#1a237e;border-radius:6px;padding:2px 12px;font-size:0.75rem;
+           font-weight:700;color:white}
 </style>
 """, unsafe_allow_html=True)
 
@@ -88,6 +84,21 @@ def safe_float(val, default=0.0):
         return f
     except (ValueError, TypeError):
         return default
+
+def color_by_score(val, reverse=False):
+    """Color code from green (best) to red (worst)."""
+    if isinstance(val, (int, float)):
+        if val > 0.5:
+            return 'background-color: #27ae60; color: white;'
+        elif val > 0.2:
+            return 'background-color: #2ecc71; color: white;'
+        elif val > -0.2:
+            return 'background-color: #f1c40f; color: black;'
+        elif val > -0.5:
+            return 'background-color: #e67e22; color: white;'
+        else:
+            return 'background-color: #e74c3c; color: white;'
+    return ''
 
 
 @st.cache_data(ttl=3600)
@@ -166,7 +177,8 @@ st.sidebar.markdown("---")
 st.sidebar.markdown(f"**Run date:** `{data1.get('run_date','?')}`")
 st.sidebar.success(f"✅ {len(universes1)} universes")
 
-tab1, tab2, tab3 = st.tabs(["🏆 Top Signals", "🔍 Full Breakdown", "📊 Window Analysis"])
+# ── Tabs ──────────────────────────────────────────────────────────────────────
+tab1, tab2 = st.tabs(["🏆 Top 3 Buys & Full Ranking", "🔍 Window-by-Window Analysis"])
 
 UNIVERSE_ORDER = ["FI_COMMODITIES", "EQUITY_SECTORS", "COMBINED"]
 UNIVERSE_LABELS = {
@@ -178,12 +190,12 @@ UNIVERSE_LABELS = {
 ntd = next_trading_day()
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 1 - TOP SIGNALS
+# TAB 1 - TOP 3 BUYS & FULL RANKING
 # ══════════════════════════════════════════════════════════════════════════════
 with tab1:
-    st.header("🏆 Top Agent Signals — Buys & Sells")
+    st.header("🏆 Top 3 ETFs to BUY — Ranked by Composite Score")
 
-    with st.expander("📖 How Free Energy-Principled Agent Works", expanded=True):
+    with st.expander("📖 How the Agent Works", expanded=False):
         st.markdown("""
 **Free Energy-Principled Agent** uses Active Inference to make trading decisions:
 
@@ -194,254 +206,333 @@ with tab1:
 | **Epistemic Drive** | Reduces model uncertainty (exploration) |
 | **Free Energy** | Unified objective combining both drives |
 
-**Action Selection:**
-- Agent chooses actions that minimize expected free energy
-- BUY when future surprise is expected to decrease
-- SELL when future surprise is expected to increase
-- HOLD when uncertainty is too high
-
-**Key Metrics:**
-- **Free Energy**: Lower = better (agent is confident)
-- **Surprise**: Lower = better (predictions match reality)
-- **Epistemic**: Higher = more uncertainty (exploration needed)
+**Composite Score** = z-score (40%) + Free Energy (30%) + Epistemic (20%) + Surprise (10%)
         """)
 
     for universe_name in UNIVERSE_ORDER:
         uni_data = universes1.get(universe_name, {})
-        top_buys = uni_data.get("top_buys", [])
-        top_sells = uni_data.get("top_sells", [])
+        full_scores = uni_data.get("full_scores", {})
         
-        if not top_buys and not top_sells:
+        if not full_scores:
             continue
 
         label = UNIVERSE_LABELS.get(universe_name, universe_name)
         
-        # Show Top Buys
-        st.markdown(f'<div class="uni-title">🟢 {label} — Top Buys (Low Free Energy)</div>', unsafe_allow_html=True)
-        if top_buys:
-            cols = st.columns(3)
-            for idx, item in enumerate(top_buys[:3]):
-                ticker = item["ticker"]
-                z_score = safe_float(item.get("z_score", 0))
-                full_data = uni_data.get("full_scores", {}).get(ticker, {})
-                action = full_data.get("action", "HOLD")
-                free_energy = safe_float(full_data.get("free_energy", 0))
-                surprise = safe_float(full_data.get("surprise", 0))
-                epistemic = safe_float(full_data.get("epistemic", 0))
-                position = safe_float(full_data.get("position", 0))
-                
-                with cols[idx]:
-                    st.markdown(f"""
-<div class="buy-card">
-  <div class="ticker">{ticker}</div>
-  <div class="score">z-score = {z_score:+.3f}</div>
+        # Compute composite scores
+        ranked_etfs = []
+        for ticker, info in full_scores.items():
+            z_score = safe_float(info.get("z_score", 0))
+            free_energy = safe_float(info.get("free_energy", 0))
+            surprise = safe_float(info.get("surprise", 0))
+            epistemic = safe_float(info.get("epistemic", 0))
+            action = info.get("action", "HOLD")
+            
+            # Composite: z-score (40%) + free_energy_reversed (30%) + epistemic (20%) + surprise_reversed (10%)
+            free_energy_norm = -np.clip(free_energy / 2, -1, 1)  # Lower free energy = better
+            surprise_norm = -np.clip(surprise / 2, -1, 1)  # Lower surprise = better
+            epistemic_norm = np.clip(epistemic, 0, 1)  # Higher epistemic = more exploration needed
+            
+            composite = (0.40 * z_score + 
+                        0.30 * free_energy_norm + 
+                        0.20 * epistemic_norm + 
+                        0.10 * surprise_norm)
+            composite = np.clip(composite, -1, 1)
+            
+            ranked_etfs.append({
+                "ticker": ticker,
+                "z_score": z_score,
+                "free_energy": free_energy,
+                "surprise": surprise,
+                "epistemic": epistemic,
+                "composite": composite,
+                "action": action
+            })
+        
+        # Sort by composite (highest = best to buy)
+        ranked_etfs = sorted(ranked_etfs, key=lambda x: x["composite"], reverse=True)
+        top_3 = ranked_etfs[:3]
+        
+        st.markdown(f'<div class="uni-title">{label}</div>', unsafe_allow_html=True)
+        
+        # ── TOP 3 BUYS ──────────────────────────────────────────────────────────
+        st.markdown("#### 🟢 Top 3 ETFs to BUY")
+        cols = st.columns(3)
+        for idx, etf in enumerate(top_3):
+            ticker = etf["ticker"]
+            composite = etf["composite"]
+            z_score = etf["z_score"]
+            free_energy = etf["free_energy"]
+            action = etf["action"]
+            
+            # Rank badge
+            rank_badge = "⭐" if idx == 0 else ("🥈" if idx == 1 else "🥉")
+            
+            with cols[idx]:
+                st.markdown(f"""
+<div class="top-card">
+  <div class="ticker">{rank_badge} {ticker}</div>
+  <div class="score">Composite = {composite:+.3f}</div>
   <div class="score">{action_badge(action)}</div>
-  <div class="score">F = {free_energy:.3f} | S = {surprise:.3f}</div>
-  <div class="score">Epistemic = {epistemic:.3f}</div>
-  <div class="score">Position = {position:.1%}</div>
+  <div class="score">z-score = {z_score:+.3f}</div>
+  <div class="score">Free Energy = {free_energy:.3f}</div>
   <div class="next-day">📅 {ntd}</div>
 </div>
 """, unsafe_allow_html=True)
-        else:
-            st.info("No BUY signals in this universe")
-
-        # Show Top Sells
-        st.markdown(f'<div class="uni-title-sell">🔴 {label} — Top Sells (High Free Energy)</div>', unsafe_allow_html=True)
-        if top_sells:
-            cols = st.columns(3)
-            for idx, item in enumerate(top_sells[:3]):
-                ticker = item["ticker"]
-                z_score = safe_float(item.get("z_score", 0))
-                full_data = uni_data.get("full_scores", {}).get(ticker, {})
-                action = full_data.get("action", "HOLD")
-                free_energy = safe_float(full_data.get("free_energy", 0))
-                surprise = safe_float(full_data.get("surprise", 0))
-                epistemic = safe_float(full_data.get("epistemic", 0))
-                position = safe_float(full_data.get("position", 0))
-                
-                with cols[idx]:
-                    st.markdown(f"""
-<div class="sell-card">
-  <div class="ticker">{ticker}</div>
-  <div class="score">z-score = {z_score:+.3f}</div>
-  <div class="score">{action_badge(action)}</div>
-  <div class="score">F = {free_energy:.3f} | S = {surprise:.3f}</div>
-  <div class="score">Epistemic = {epistemic:.3f}</div>
-  <div class="score">Position = {position:.1%}</div>
-  <div class="next-day">📅 {ntd}</div>
-</div>
-""", unsafe_allow_html=True)
-        else:
-            st.info("No SELL signals in this universe")
-
-        # Full ranking
-        with st.expander(f"📋 Full ranking — {label}"):
-            full = uni_data.get("full_scores", {})
-            if full:
-                rows = []
-                for t, info in full.items():
-                    rows.append({
-                        "ETF": t,
-                        "z-score": round(safe_float(info.get("z_score", 0)), 4),
-                        "Free Energy": round(safe_float(info.get("free_energy", 0)), 4),
-                        "Surprise": round(safe_float(info.get("surprise", 0)), 4),
-                        "Epistemic": round(safe_float(info.get("epistemic", 0)), 4),
-                        "Position": f"{safe_float(info.get('position', 0))*100:.0f}%",
-                        "Action": info.get("action", "HOLD")
-                    })
-                df_rank = pd.DataFrame(rows).sort_values("z-score", ascending=False)
-                st.dataframe(df_rank, use_container_width=True, hide_index=True)
+        
+        # ── FULL RANKING TABLE (GREEN TO RED) ──────────────────────────────────
+        with st.expander(f"📋 Full Ranking — {label} (Green = Best to Buy, Red = Worst)"):
+            rows = []
+            for idx, etf in enumerate(ranked_etfs):
+                rows.append({
+                    "Rank": idx + 1,
+                    "ETF": etf["ticker"],
+                    "Composite Score": round(etf["composite"], 4),
+                    "z-score": round(etf["z_score"], 4),
+                    "Free Energy": round(etf["free_energy"], 4),
+                    "Surprise": round(etf["surprise"], 4),
+                    "Epistemic": round(etf["epistemic"], 4),
+                    "Action": etf["action"]
+                })
+            
+            df = pd.DataFrame(rows)
+            
+            # Apply color coding
+            styled_df = df.style.map(
+                lambda x: 'background-color: #27ae60; color: white;' if isinstance(x, (int, float)) and x <= 3 else '',
+                subset=['Rank']
+            ).map(
+                lambda x: 'background-color: #2ecc71; color: white;' if isinstance(x, (int, float)) and 4 <= x <= 6 else '',
+                subset=['Rank']
+            ).map(
+                lambda x: 'background-color: #f1c40f; color: black;' if isinstance(x, (int, float)) and 7 <= x <= 10 else '',
+                subset=['Rank']
+            ).map(
+                lambda x: 'background-color: #e67e22; color: white;' if isinstance(x, (int, float)) and 11 <= x <= 15 else '',
+                subset=['Rank']
+            ).map(
+                lambda x: 'background-color: #e74c3c; color: white;' if isinstance(x, (int, float)) and x > 15 else '',
+                subset=['Rank']
+            )
+            
+            # Color composite column
+            styled_df = styled_df.map(
+                lambda x: 'background-color: #27ae60; color: white;' if isinstance(x, (int, float)) and x > 0.3 else '',
+                subset=['Composite Score']
+            ).map(
+                lambda x: 'background-color: #2ecc71; color: white;' if isinstance(x, (int, float)) and 0.1 < x <= 0.3 else '',
+                subset=['Composite Score']
+            ).map(
+                lambda x: 'background-color: #f1c40f; color: black;' if isinstance(x, (int, float)) and -0.1 < x <= 0.1 else '',
+                subset=['Composite Score']
+            ).map(
+                lambda x: 'background-color: #e67e22; color: white;' if isinstance(x, (int, float)) and -0.3 < x <= -0.1 else '',
+                subset=['Composite Score']
+            ).map(
+                lambda x: 'background-color: #e74c3c; color: white;' if isinstance(x, (int, float)) and x <= -0.3 else '',
+                subset=['Composite Score']
+            )
+            
+            st.dataframe(styled_df, use_container_width=True, hide_index=True)
+            
+            # Summary stats
+            best = ranked_etfs[0]
+            worst = ranked_etfs[-1]
+            st.caption(f"**Best:** {best['ticker']} (Composite: {best['composite']:+.3f}) | **Worst:** {worst['ticker']} (Composite: {worst['composite']:+.3f})")
         st.divider()
 
-    st.caption(f"Run date: {data1.get('run_date','?')} · Free Energy = Pragmatic + Epistemic · Lower is better")
+    st.caption(f"Run date: {data1.get('run_date','?')} · Composite = z-score(40%) + Free Energy(30%) + Epistemic(20%) + Surprise(10%)")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 2 - FULL BREAKDOWN
+# TAB 2 - WINDOW-BY-WINDOW ANALYSIS
 # ══════════════════════════════════════════════════════════════════════════════
 with tab2:
-    st.header("🔍 Full Agent Breakdown")
-
-    if not universes2:
-        st.warning("Breakdown data not found.")
-        st.stop()
-
-    for universe_name in UNIVERSE_ORDER:
-        label = UNIVERSE_LABELS.get(universe_name, universe_name)
-        uni_data = universes2.get(universe_name, {})
-        ranking = uni_data.get("full_ranking", [])
-
-        st.markdown(f'<div class="uni-title">{label}</div>', unsafe_allow_html=True)
-
-        if not ranking:
-            st.info(f"No data for {universe_name}")
-            st.divider()
-            continue
-
-        rows = []
-        for item in ranking:
-            rows.append({
-                "ETF": item.get("ticker", ""),
-                "z-score": round(safe_float(item.get("z_score", 0)), 4),
-                "Free Energy": round(safe_float(item.get("free_energy", 0)), 4),
-                "Surprise": round(safe_float(item.get("surprise", 0)), 4),
-                "Epistemic": round(safe_float(item.get("epistemic", 0)), 4),
-                "Position": f"{safe_float(item.get('position', 0))*100:.0f}%",
-                "Signal": round(safe_float(item.get("signal", 0)), 4),
-                "Action": item.get("action", "HOLD")
-            })
-
-        df = pd.DataFrame(rows).sort_values("z-score", ascending=False)
-        st.dataframe(df, use_container_width=True, hide_index=True)
-        st.divider()
-
-    st.caption(f"Run date: {data2.get('run_date','?')} · Free Energy = variational free energy (lower = better)")
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# TAB 3 - WINDOW ANALYSIS
-# ══════════════════════════════════════════════════════════════════════════════
-with tab3:
-    st.header("📊 Window-Level Agent Analysis")
-
-    st.markdown("""
-    ### How Windows Work
-    
-    The agent maintains separate generative models for each time horizon:
-    
-    | Window | Purpose | Weight |
-    |--------|---------|--------|
-    | **63d** | Short-term dynamics | Shared (60%) |
-    | **252d** | Core signal (Primary) | **40%** |
-    | **504d** | Medium-term structure | Shared (60%) |
-    | **1008d** | Structural regimes | Shared (60%) |
-    | **2016d** | Secular trends | Shared (60%) |
-    | **4032d+** | Full history | Shared (60%) |
-    
-    The primary window (252d) gets 40% weight, all others share 60%.
-    """)
+    st.header("🔍 Window-by-Window Analysis — All ETFs Color-Coded")
 
     if not universes2:
         st.warning("Window-level data not found.")
         st.stop()
 
-    # Get window signals from the data
-    window_data = {}
+    # Get all window signals from the data
+    all_window_data = {}
+    window_columns = {}
+    
     for universe_name in UNIVERSE_ORDER:
         uni_data = universes2.get(universe_name, {})
         ranking = uni_data.get("full_ranking", [])
         
         for item in ranking:
             ticker = item.get("ticker", "")
-            if ticker not in window_data:
-                window_data[ticker] = {}
-            # Check if window signals are available
-            if "window_signals" in item:
-                for ws in item["window_signals"]:
-                    w = ws.get("window", 0)
-                    if w not in window_data[ticker]:
-                        window_data[ticker][w] = {
-                            "free_energy": ws.get("free_energy", 0),
-                            "surprise": ws.get("surprise", 0),
-                            "epistemic": ws.get("epistemic", 0),
-                            "action": ws.get("action", "HOLD")
-                        }
+            window_signals = item.get("window_signals", [])
+            
+            if ticker not in all_window_data:
+                all_window_data[ticker] = {
+                    "universe": universe_name,
+                    "z_score": safe_float(item.get("z_score", 0)),
+                    "action": item.get("action", "HOLD")
+                }
+            
+            for ws in window_signals:
+                w = ws.get("window", 0)
+                if w not in window_columns:
+                    window_columns[w] = {
+                        "free_energy": f"FE_{w}",
+                        "surprise": f"S_{w}",
+                        "epistemic": f"E_{w}",
+                        "action": f"A_{w}"
+                    }
+                
+                all_window_data[ticker][f"FE_{w}"] = safe_float(ws.get("free_energy", 0))
+                all_window_data[ticker][f"S_{w}"] = safe_float(ws.get("surprise", 0))
+                all_window_data[ticker][f"E_{w}"] = safe_float(ws.get("epistemic", 0))
+                all_window_data[ticker][f"A_{w}"] = ws.get("action", "HOLD")
 
-    if not window_data:
+    if not all_window_data:
         st.info("No window-level data available. Run trainer with multi-window support.")
         st.stop()
 
-    # Select ticker
-    ticker_options = sorted(window_data.keys())
-    selected_ticker = st.selectbox("Select ETF to analyze", ticker_options)
+    # Convert to DataFrame
+    df_rows = []
+    for ticker, data in all_window_data.items():
+        row = {
+            "ETF": ticker,
+            "Universe": data.get("universe", ""),
+            "z-score": round(data.get("z_score", 0), 4),
+            "Action": data.get("action", "HOLD")
+        }
+        for w in sorted(window_columns.keys()):
+            row[f"FE_{w}"] = round(data.get(f"FE_{w}", 0), 4)
+            row[f"S_{w}"] = round(data.get(f"S_{w}", 0), 4)
+            row[f"E_{w}"] = round(data.get(f"E_{w}", 0), 4)
+            row[f"A_{w}"] = data.get(f"A_{w}", "HOLD")
+        df_rows.append(row)
 
-    if selected_ticker:
-        data = window_data.get(selected_ticker, {})
-        
-        if data:
-            # Create DataFrame
-            rows = []
-            for w, vals in data.items():
-                rows.append({
-                    "Window (days)": w,
-                    "Free Energy": round(safe_float(vals.get("free_energy", 0)), 4),
-                    "Surprise": round(safe_float(vals.get("surprise", 0)), 4),
-                    "Epistemic": round(safe_float(vals.get("epistemic", 0)), 4),
-                    "Action": vals.get("action", "HOLD")
-                })
-            
-            df = pd.DataFrame(rows).sort_values("Window (days)")
-            
-            st.markdown(f"### 🧠 {selected_ticker} — Agent State by Window")
-            
-            # Color coding for free energy
-            styled_df = df.style.map(
-                lambda x: 'background-color: #27ae60; color: white;' if isinstance(x, (int, float)) and x < 0 else '',
-                subset=['Free Energy']
-            ).map(
-                lambda x: 'background-color: #f1c40f; color: black;' if isinstance(x, (int, float)) and 0 <= x <= 1 else '',
-                subset=['Free Energy']
-            ).map(
-                lambda x: 'background-color: #e74c3c; color: white;' if isinstance(x, (int, float)) and x > 1 else '',
-                subset=['Free Energy']
-            )
-            
-            st.dataframe(styled_df, use_container_width=True, hide_index=True)
-            
-            # Summary
-            st.caption(f"**Summary:** Best window for {selected_ticker}: {df.loc[df['Free Energy'].idxmin(), 'Window (days)']}d (Free Energy = {df['Free Energy'].min():.4f})")
-            
-            # Add explanation
-            with st.expander("📖 How to read window analysis"):
-                st.markdown("""
-                - **Free Energy**: Lower = better. Agent is more confident in this window.
-                - **Surprise**: Lower = better. Predictions match reality better.
-                - **Epistemic**: Higher = more uncertainty. Agent needs more exploration.
-                - **Action**: What the agent would do based on this window alone.
-                
-                **Best Window** = lowest Free Energy → most reliable signal for this ETF.
-                """)
+    df = pd.DataFrame(df_rows).sort_values("z-score", ascending=False)
+
+    # ── Select Universe Filter ──────────────────────────────────────────────────
+    universe_filter = st.selectbox(
+        "Filter by Universe",
+        ["All Universes"] + [UNIVERSE_LABELS.get(u, u) for u in UNIVERSE_ORDER]
+    )
+
+    if universe_filter != "All Universes":
+        # Find the universe key
+        for key, label in UNIVERSE_LABELS.items():
+            if label == universe_filter:
+                df = df[df["Universe"] == key]
+                break
+
+    # ── Window Selector ─────────────────────────────────────────────────────────
+    sorted_windows = sorted(window_columns.keys())
+    display_windows = []
+    for w in sorted_windows:
+        if w == config.PRIMARY_WINDOW:
+            display_windows.append(f"{w}d ⭐ Primary")
         else:
-            st.info(f"No window data available for {selected_ticker}")
+            display_windows.append(f"{w}d")
+    
+    selected_window_idx = st.selectbox(
+        "Select Window to Display",
+        options=range(len(display_windows)),
+        format_func=lambda i: display_windows[i]
+    )
+    selected_window = sorted_windows[selected_window_idx]
 
-    st.caption(f"Run date: {data2.get('run_date','?')} · Window-specific agent states")
+    # ── Display Window Data ────────────────────────────────────────────────────
+    st.markdown(f"### 📊 Window: **{selected_window}d** — All ETFs Color-Coded")
+
+    # Prepare columns for display
+    display_columns = ["Rank", "ETF", "Universe", "z-score", "Action", f"FE_{selected_window}", f"S_{selected_window}", f"E_{selected_window}", f"A_{selected_window}"]
+
+    # Create display DataFrame
+    display_rows = []
+    for idx, row in df.iterrows():
+        display_rows.append({
+            "Rank": len(display_rows) + 1,
+            "ETF": row["ETF"],
+            "Universe": row["Universe"],
+            "z-score": row["z-score"],
+            "Action": row["Action"],
+            f"Free Energy ({selected_window}d)": row[f"FE_{selected_window}"],
+            f"Surprise ({selected_window}d)": row[f"S_{selected_window}"],
+            f"Epistemic ({selected_window}d)": row[f"E_{selected_window}"],
+            f"Action @ {selected_window}d": row[f"A_{selected_window}"]
+        })
+
+    display_df = pd.DataFrame(display_rows).sort_values("z-score", ascending=False)
+    display_df["Rank"] = range(1, len(display_df) + 1)
+
+    # Color code by z-score (green to red)
+    styled_df = display_df.style.map(
+        lambda x: 'background-color: #27ae60; color: white;' if isinstance(x, (int, float)) and x <= 3 else '',
+        subset=['Rank']
+    ).map(
+        lambda x: 'background-color: #2ecc71; color: white;' if isinstance(x, (int, float)) and 4 <= x <= 6 else '',
+        subset=['Rank']
+    ).map(
+        lambda x: 'background-color: #f1c40f; color: black;' if isinstance(x, (int, float)) and 7 <= x <= 10 else '',
+        subset=['Rank']
+    ).map(
+        lambda x: 'background-color: #e67e22; color: white;' if isinstance(x, (int, float)) and 11 <= x <= 15 else '',
+        subset=['Rank']
+    ).map(
+        lambda x: 'background-color: #e74c3c; color: white;' if isinstance(x, (int, float)) and x > 15 else '',
+        subset=['Rank']
+    )
+
+    # Color z-score column
+    styled_df = styled_df.map(
+        lambda x: 'background-color: #27ae60; color: white;' if isinstance(x, (int, float)) and x > 0.5 else '',
+        subset=['z-score']
+    ).map(
+        lambda x: 'background-color: #2ecc71; color: white;' if isinstance(x, (int, float)) and 0.2 < x <= 0.5 else '',
+        subset=['z-score']
+    ).map(
+        lambda x: 'background-color: #f1c40f; color: black;' if isinstance(x, (int, float)) and -0.2 < x <= 0.2 else '',
+        subset=['z-score']
+    ).map(
+        lambda x: 'background-color: #e67e22; color: white;' if isinstance(x, (int, float)) and -0.5 < x <= -0.2 else '',
+        subset=['z-score']
+    ).map(
+        lambda x: 'background-color: #e74c3c; color: white;' if isinstance(x, (int, float)) and x <= -0.5 else '',
+        subset=['z-score']
+    )
+
+    st.dataframe(styled_df, use_container_width=True, hide_index=True)
+
+    # ── Top 3 at This Window ────────────────────────────────────────────────────
+    st.markdown(f"### 🟢 Top 3 ETFs to BUY at {selected_window}d")
+
+    top_3_window = display_df.head(3)
+    cols = st.columns(3)
+    for idx, row in top_3_window.iterrows():
+        ticker = row["ETF"]
+        z_score = row["z-score"]
+        fe = row[f"Free Energy ({selected_window}d)"]
+        action = row[f"Action @ {selected_window}d"]
+        rank_badge = "⭐" if idx == 0 else ("🥈" if idx == 1 else "🥉")
+        
+        with cols[idx % 3]:
+            st.markdown(f"""
+<div class="top-card">
+  <div class="ticker">{rank_badge} {ticker}</div>
+  <div class="score">z-score = {z_score:+.3f}</div>
+  <div class="score">{action_badge(action)}</div>
+  <div class="score">Free Energy = {fe:.3f}</div>
+  <div class="next-day">📅 {ntd}</div>
+</div>
+""", unsafe_allow_html=True)
+
+    # ── Legend ──────────────────────────────────────────────────────────────────
+    with st.expander("🎨 Color Legend", expanded=False):
+        st.markdown("""
+| Color | Meaning |
+|-------|---------|
+| 🟢 **Green** | **BUY** — Favorable risk/reward, low free energy |
+| 🟡 **Yellow** | **HOLD** — Neutral, wait for confirmation |
+| 🟠 **Orange** | **REDUCE** — Unfavorable risk/reward |
+| 🔴 **Red** | **SELL** — High free energy, avoid |
+| ⭐ **Blue** | **TOP PICK** — Best risk/reward in the universe |
+        """)
+
+    st.caption(f"Run date: {data2.get('run_date','?')} · Green = Best to Buy · Red = Worst to Buy")
