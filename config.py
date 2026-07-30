@@ -103,7 +103,17 @@ EPISTEMIC_DRIVE = {
     "decay_rate": 0.99,          # Exploration decay over time
 }
 
+# Add to config.py for better signal differentiation:
 
+# ── Action Scoring ──────────────────────────────────────────────────────────
+
+ACTION_SCORES = {
+    "STRONG BUY": 1.5,
+    "BUY": 1.0,
+    "HOLD": 0.0,
+    "REDUCE": -0.5,
+    "STRONG SELL": -1.0,
+}
 # ── Macro Signals ────────────────────────────────────────────────────────────
 
 MACRO_SIGNALS = [
