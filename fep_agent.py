@@ -1,206 +1,481 @@
 """
-fep_agent.py  —  Free Energy-Principled Trading Agent
-=======================================================
+fep_agent.py  —  Free Energy-Principled Agent (Proper Implementation)
+========================================================================
 
-Uses statistical moments + macro signals + momentum to compute:
-- Surprise: Deviation from expected returns
-- Free Energy: Combined measure of risk and uncertainty
-- Action selection: Choose actions that minimize expected free energy
+Implements Active Inference with:
+- Deep generative model (neural network)
+- Variational inference (Bayesian updating)
+- Expected free energy minimization
+- Epistemic and pragmatic drives
+- Proper action selection
 """
 
 import numpy as np
 import pandas as pd
-from scipy.special import softmax
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.distributions import Normal, Categorical
 from typing import Dict, List, Tuple, Optional
 import warnings
 warnings.filterwarnings("ignore")
 
 
-def compute_returns_features(returns: np.ndarray, window: int) -> Dict:
-    """Compute statistical features from returns for a given window."""
-    if len(returns) < window:
-        window = len(returns)
-    
-    recent = returns[-window:]
-    
-    # Basic statistics
-    mean = np.mean(recent)
-    std = np.std(recent)
-    skew = pd.Series(recent).skew() if len(recent) > 2 else 0
-    kurt = pd.Series(recent).kurtosis() if len(recent) > 3 else 0
-    
-    # Rolling statistics (short vs long)
-    short_window = min(20, len(recent))
-    long_window = min(60, len(recent))
-    
-    short_mean = np.mean(recent[-short_window:]) if len(recent) >= short_window else mean
-    long_mean = np.mean(recent[-long_window:]) if len(recent) >= long_window else mean
-    
-    short_std = np.std(recent[-short_window:]) if len(recent) >= short_window else std
-    long_std = np.std(recent[-long_window:]) if len(recent) >= long_window else std
-    
-    # Momentum: short vs long
-    momentum = short_mean - long_mean
-    
-    # Volatility ratio
-    vol_ratio = short_std / (long_std + 1e-6)
-    
-    # Recent performance (last 5 days vs last 20 days)
-    recent_perf = np.mean(recent[-5:]) if len(recent) >= 5 else mean
-    medium_perf = np.mean(recent[-20:]) if len(recent) >= 20 else mean
-    
-    return {
-        "mean": mean,
-        "std": std,
-        "skew": skew,
-        "kurt": kurt,
-        "short_mean": short_mean,
-        "long_mean": long_mean,
-        "momentum": momentum,
-        "vol_ratio": vol_ratio,
-        "recent_perf": recent_perf,
-        "medium_perf": medium_perf,
-        "n": len(recent)
-    }
+# ── Neural Network Models ─────────────────────────────────────────────────────
 
-
-def compute_surprise(returns: np.ndarray, window: int = 252) -> float:
-    """Compute surprise as deviation from expected returns."""
-    if len(returns) < 20:
-        return 0.5
-    
-    features = compute_returns_features(returns, window)
-    
-    # Expected return based on long-term mean
-    expected = features["long_mean"]
-    
-    # Actual recent return
-    actual = features["short_mean"]
-    
-    # Surprise = absolute deviation from expectation (normalized)
-    surprise = abs(actual - expected) / (features["std"] + 1e-6)
-    
-    # Scale to 0-2 range
-    return min(2.0, surprise)
-
-
-def compute_epistemic_value(returns: np.ndarray, window: int = 252) -> float:
-    """Compute epistemic value (model uncertainty)."""
-    if len(returns) < 20:
-        return 0.5
-    
-    features = compute_returns_features(returns, window)
-    
-    # Uncertainty measures:
-    # 1. Volatility relative to history
-    vol_uncertainty = features["std"] / (np.mean(features["std"]) + 1e-6)
-    vol_uncertainty = min(2.0, vol_uncertainty)
-    
-    # 2. Kurtosis (tail risk)
-    tail_uncertainty = abs(features["kurt"]) / 5 if not np.isnan(features["kurt"]) else 0.5
-    tail_uncertainty = min(1.0, tail_uncertainty)
-    
-    # 3. Volatility ratio (regime change)
-    regime_uncertainty = abs(features["vol_ratio"] - 1) * 1.5
-    regime_uncertainty = min(1.0, regime_uncertainty)
-    
-    epistemic = (vol_uncertainty + tail_uncertainty + regime_uncertainty) / 3
-    return min(1.0, max(0.1, epistemic))
-
-
-def compute_momentum_signal(returns: np.ndarray, window: int = 252) -> float:
-    """Compute momentum signal (-1 to 1)."""
-    if len(returns) < 20:
-        return 0
-    
-    features = compute_returns_features(returns, window)
-    
-    # Momentum = short-term - long-term mean (normalized)
-    momentum = features["momentum"] / (features["std"] + 1e-6)
-    
-    # Recent performance boost
-    recent_boost = (features["recent_perf"] - features["medium_perf"]) / (features["std"] + 1e-6)
-    
-    # Combine
-    signal = momentum * 0.7 + recent_boost * 0.3
-    
-    # Clamp to -1 to 1
-    return max(-1.0, min(1.0, signal))
-
-
-def compute_free_energy_with_macro(
-    returns: np.ndarray, 
-    macro_signal: float = 0,
-    window: int = 252
-) -> Dict:
+class GenerativeModel(nn.Module):
     """
-    Compute free energy incorporating macro signals.
+    Deep generative model of market dynamics.
+    
+    p(o_t, s_t | s_{t-1}, a_{t-1}) = p(o_t | s_t) * p(s_t | s_{t-1}, a_{t-1})
     """
-    features = compute_returns_features(returns, window)
     
-    # Base components
-    surprise = compute_surprise(returns, window)
-    epistemic = compute_epistemic_value(returns, window)
-    momentum = compute_momentum_signal(returns, window)
+    def __init__(self, state_dim: int = 32, obs_dim: int = 16, action_dim: int = 3, 
+                 hidden_dim: int = 128):
+        super().__init__()
+        
+        self.state_dim = state_dim
+        self.obs_dim = obs_dim
+        self.action_dim = action_dim
+        
+        # Transition model: p(s_t | s_{t-1}, a_{t-1})
+        self.transition_net = nn.Sequential(
+            nn.Linear(state_dim + action_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, state_dim * 2)  # mean + log_var
+        )
+        
+        # Observation model: p(o_t | s_t)
+        self.observation_net = nn.Sequential(
+            nn.Linear(state_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, obs_dim * 2)  # mean + log_var
+        )
+        
+        # Prior over initial state
+        self.register_buffer('prior_mean', torch.zeros(state_dim))
+        self.register_buffer('prior_log_var', torch.zeros(state_dim))
+        
+    def transition(self, state: torch.Tensor, action: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Compute transition distribution p(s_t | s_{t-1}, a_{t-1})."""
+        combined = torch.cat([state, action], dim=-1)
+        params = self.transition_net(combined)
+        mean, log_var = params.chunk(2, dim=-1)
+        return mean, log_var
     
-    # Pragmatic value: low surprise = good, high momentum = good
-    pragmatic_value = -surprise + momentum * 0.5
+    def observation(self, state: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Compute observation distribution p(o_t | s_t)."""
+        params = self.observation_net(state)
+        mean, log_var = params.chunk(2, dim=-1)
+        return mean, log_var
     
-    # Epistemic drive: explore when uncertain
-    epistemic_value = epistemic * 0.3
+    def sample_state(self, mean: torch.Tensor, log_var: torch.Tensor) -> torch.Tensor:
+        """Sample from Gaussian distribution using reparameterization trick."""
+        std = torch.exp(0.5 * log_var)
+        eps = torch.randn_like(std)
+        return mean + eps * std
     
-    # Macro influence: risk-on macro = positive signal
-    macro_effect = macro_signal * 0.2
-    
-    # Free energy (lower = better)
-    free_energy = pragmatic_value + epistemic_value + macro_effect
-    
-    # Scale to a reasonable range
-    free_energy = free_energy * 2
-    
-    return {
-        "free_energy": free_energy,
-        "surprise": surprise,
-        "epistemic": epistemic,
-        "momentum": momentum,
-        "pragmatic_value": pragmatic_value,
-        "epistemic_value": epistemic_value,
-        "macro_effect": macro_effect,
-        "mean": features["mean"],
-        "std": features["std"],
-        "skew": features["skew"],
-        "kurt": features["kurt"]
-    }
+    def forward(self, state: torch.Tensor, action: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Forward pass through the generative model."""
+        # Transition
+        next_mean, next_log_var = self.transition(state, action)
+        next_state = self.sample_state(next_mean, next_log_var)
+        
+        # Observation
+        obs_mean, obs_log_var = self.observation(next_state)
+        
+        return next_mean, next_log_var, obs_mean, obs_log_var
 
 
-def compute_macro_signal(macro_df: pd.DataFrame, idx: int) -> float:
-    """Extract macro signal from macro dataframe."""
-    if macro_df is None or len(macro_df) == 0:
-        return 0
+class RecognitionModel(nn.Module):
+    """
+    Recognition model (inference network) for variational inference.
+    q(s_t | o_t, s_{t-1}, a_{t-1})
+    """
     
-    try:
-        # Get latest macro values
-        if idx < len(macro_df):
-            latest_macro = macro_df.iloc[idx] if idx > 0 else macro_df.iloc[0]
+    def __init__(self, state_dim: int = 32, obs_dim: int = 16, action_dim: int = 3,
+                 hidden_dim: int = 128):
+        super().__init__()
+        
+        self.state_dim = state_dim
+        self.obs_dim = obs_dim
+        self.action_dim = action_dim
+        
+        self.recognition_net = nn.Sequential(
+            nn.Linear(obs_dim + state_dim + action_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, state_dim * 2)  # mean + log_var
+        )
+    
+    def forward(self, obs: torch.Tensor, prev_state: torch.Tensor, action: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Compute posterior distribution q(s_t | o_t, s_{t-1}, a_{t-1})."""
+        combined = torch.cat([obs, prev_state, action], dim=-1)
+        params = self.recognition_net(combined)
+        mean, log_var = params.chunk(2, dim=-1)
+        return mean, log_var
+
+
+class FEPAgent:
+    """
+    Free Energy-Principled Agent with Deep Generative Model.
+    
+    Implements:
+    - Variational free energy minimization
+    - Expected free energy action selection
+    - Epistemic (exploration) and pragmatic (exploitation) drives
+    """
+    
+    def __init__(self, config: Dict):
+        self.config = config
+        
+        # Dimensions
+        self.state_dim = config.get("state_dim", 32)
+        self.obs_dim = config.get("observation_dim", 16)
+        self.action_dim = config.get("action_dim", 3)
+        self.hidden_dim = config.get("hidden_dim", 128)
+        self.n_actions = config.get("n_actions", 3)
+        self.action_labels = ["BUY", "HOLD", "SELL"]
+        
+        # Learning parameters
+        self.learning_rate = config.get("learning_rate", 0.001)
+        self.beta = config.get("beta", 1.0)  # Temperature
+        self.gamma = config.get("gamma", 0.99)  # Discount factor
+        self.lambda_epistemic = config.get("lambda_epistemic", 0.5)
+        self.lambda_pragmatic = config.get("lambda_pragmatic", 0.5)
+        
+        # Initialize models
+        self.generative_model = GenerativeModel(
+            state_dim=self.state_dim,
+            obs_dim=self.obs_dim,
+            action_dim=self.action_dim,
+            hidden_dim=self.hidden_dim
+        )
+        
+        self.recognition_model = RecognitionModel(
+            state_dim=self.state_dim,
+            obs_dim=self.obs_dim,
+            action_dim=self.action_dim,
+            hidden_dim=self.hidden_dim
+        )
+        
+        # Optimizers
+        self.gen_optimizer = optim.Adam(self.generative_model.parameters(), lr=self.learning_rate)
+        self.rec_optimizer = optim.Adam(self.recognition_model.parameters(), lr=self.learning_rate)
+        
+        # State tracking
+        self.current_state = None
+        self.current_obs = None
+        self.current_action = None
+        self.belief_mean = None
+        self.belief_log_var = None
+        self.position = 0.0
+        self.max_position = 1.0
+        
+        # Memory buffer for online learning
+        self.memory = []
+        self.memory_size = config.get("memory_size", 1000)
+        
+        # Training counter
+        self.training_steps = 0
+        
+    def reset_belief(self):
+        """Reset the agent's belief state."""
+        self.belief_mean = torch.zeros(self.state_dim)
+        self.belief_log_var = torch.zeros(self.state_dim)
+        self.current_state = torch.zeros(self.state_dim)
+        
+    def encode_observation(self, returns: np.ndarray, macro: np.ndarray) -> torch.Tensor:
+        """Encode market data into observation tensor."""
+        # Aggregate features
+        features = []
+        
+        # Return features
+        if len(returns) > 0:
+            recent = returns[-min(20, len(returns)):]
+            features.extend([
+                np.mean(recent),
+                np.std(recent),
+                np.percentile(recent, 25),
+                np.percentile(recent, 75),
+                recent[-1] if len(recent) > 0 else 0,
+                np.mean(recent[-5:]) if len(recent) >= 5 else 0,
+                np.mean(recent[-10:]) if len(recent) >= 10 else 0,
+            ])
         else:
-            latest_macro = macro_df.iloc[-1]
+            features.extend([0] * 7)
         
-        # Combine macro signals (VIX, DXY, spreads)
-        # VIX: high = risk-off
-        vix = latest_macro.get("VIX", 20)
-        vix_signal = - (vix - 20) / 20  # Normalized: VIX > 20 = negative
+        # Macro features
+        if len(macro) > 0:
+            macro_flat = macro.flatten()[:9]
+            features.extend(macro_flat.tolist())
+        else:
+            features.extend([0] * 9)
         
-        # DXY: high = risk-off
-        dxy = latest_macro.get("DXY", 100)
-        dxy_signal = - (dxy - 100) / 10
+        # Pad or truncate to obs_dim
+        if len(features) < self.obs_dim:
+            features.extend([0] * (self.obs_dim - len(features)))
+        else:
+            features = features[:self.obs_dim]
         
-        # Combined macro signal (-1 to 1)
-        macro_signal = (vix_signal + dxy_signal) / 2
+        return torch.tensor(features, dtype=torch.float32)
+    
+    def compute_variational_free_energy(self, obs: torch.Tensor, prev_state: torch.Tensor, 
+                                         action: torch.Tensor) -> Dict:
+        """
+        Compute variational free energy for a given action.
         
-        return max(-1.0, min(1.0, macro_signal))
-    except Exception:
-        return 0
+        F = E_q[log q(s) - log p(o, s)] 
+          = KL[q(s) || p(s)] - E_q[log p(o | s)]
+        """
+        # Get posterior from recognition model
+        post_mean, post_log_var = self.recognition_model(obs, prev_state, action)
+        post_std = torch.exp(0.5 * post_log_var)
+        
+        # Sample from posterior
+        eps = torch.randn_like(post_std)
+        state = post_mean + eps * post_std
+        
+        # Get prior from generative model
+        prior_mean, prior_log_var = self.generative_model.transition(prev_state, action)
+        prior_std = torch.exp(0.5 * prior_log_var)
+        
+        # KL divergence: KL[q(s) || p(s)]
+        # Analytical KL for Gaussians
+        kl_div = torch.sum(
+            prior_log_var - post_log_var + 
+            (post_std**2 + (post_mean - prior_mean)**2) / (prior_std**2 + 1e-8) - 1
+        ) * 0.5
+        
+        # Expected log-likelihood: E_q[log p(o | s)]
+        obs_mean, obs_log_var = self.generative_model.observation(state)
+        obs_std = torch.exp(0.5 * obs_log_var)
+        
+        # Negative log-likelihood (simplified)
+        nll = torch.sum(
+            (obs - obs_mean)**2 / (2 * obs_std**2 + 1e-8) + 
+            0.5 * torch.log(obs_std**2 + 1e-8)
+        )
+        
+        # Variational free energy
+        free_energy = kl_div + nll
+        
+        return {
+            "free_energy": free_energy.item(),
+            "kl_div": kl_div.item(),
+            "nll": nll.item(),
+            "post_mean": post_mean.detach().numpy(),
+            "post_log_var": post_log_var.detach().numpy(),
+            "state": state.detach().numpy()
+        }
+    
+    def compute_expected_free_energy(self, obs: torch.Tensor, state: torch.Tensor, 
+                                      action: torch.Tensor) -> Dict:
+        """
+        Compute expected free energy for action selection.
+        
+        G = E[F] = pragmatic_value + epistemic_value
+        """
+        # Generate imaginary future
+        next_mean, next_log_var, obs_mean, obs_log_var = self.generative_model(state, action)
+        
+        # Epistemic value: expected reduction in uncertainty
+        # Higher uncertainty = higher epistemic value (exploration)
+        epistemic_value = torch.exp(0.5 * next_log_var).mean().item()
+        epistemic_value = min(1.0, epistemic_value)
+        
+        # Pragmatic value: expected reward (negative surprise)
+        # Lower surprise = higher pragmatic value (exploitation)
+        surprise = torch.sum(
+            (obs - obs_mean)**2 / (2 * torch.exp(obs_log_var) + 1e-8)
+        ).item()
+        pragmatic_value = -surprise
+        
+        # Expected free energy
+        expected_free_energy = (
+            self.lambda_pragmatic * pragmatic_value + 
+            self.lambda_epistemic * epistemic_value
+        )
+        
+        return {
+            "expected_free_energy": expected_free_energy,
+            "pragmatic_value": pragmatic_value,
+            "epistemic_value": epistemic_value,
+            "surprise": surprise
+        }
+    
+    def select_action(self, obs: torch.Tensor, explore: bool = True) -> Dict:
+        """Select action by minimizing expected free energy."""
+        if self.belief_mean is None:
+            self.reset_belief()
+        
+        action_results = []
+        
+        for action_idx in range(self.n_actions):
+            action_tensor = torch.zeros(self.action_dim)
+            action_tensor[action_idx] = 1.0
+            
+            # Compute expected free energy for this action
+            result = self.compute_expected_free_energy(
+                obs, 
+                self.belief_mean,
+                action_tensor
+            )
+            result["action"] = action_idx
+            result["action_label"] = self.action_labels[action_idx]
+            action_results.append(result)
+        
+        # Convert to array
+        e_fe_values = np.array([r["expected_free_energy"] for r in action_results])
+        
+        # Softmax for action probabilities (lower expected free energy = better)
+        if explore:
+            # Exploration: softmax with temperature
+            e_fe_shifted = e_fe_values - np.max(e_fe_values)
+            probs = np.exp(self.beta * e_fe_shifted) / np.sum(np.exp(self.beta * e_fe_shifted) + 1e-8)
+        else:
+            # Exploitation: greedy
+            probs = np.zeros(self.n_actions)
+            probs[np.argmax(e_fe_values)] = 1.0
+        
+        # Sample action
+        selected_idx = np.random.choice(self.n_actions, p=probs)
+        
+        # Position limits
+        if self.position >= self.max_position * 0.9 and selected_idx == 0:  # BUY
+            selected_idx = 1
+        if self.position <= -self.max_position * 0.9 and selected_idx == 2:  # SELL
+            selected_idx = 1
+        
+        # Update position
+        action_delta = [0.1, 0.0, -0.1][selected_idx]
+        self.position = np.clip(self.position + action_delta, -self.max_position, self.max_position)
+        
+        result = action_results[selected_idx]
+        result["selected"] = True
+        result["position"] = self.position
+        result["action_probabilities"] = probs.tolist()
+        result["action_index"] = selected_idx
+        
+        # Store action for learning
+        self.current_action = selected_idx
+        
+        return result
+    
+    def update_belief(self, obs: torch.Tensor, action: torch.Tensor):
+        """Update belief state using variational inference."""
+        if self.belief_mean is None:
+            self.reset_belief()
+        
+        # Compute posterior
+        post_mean, post_log_var = self.recognition_model(
+            obs, 
+            self.belief_mean,
+            action
+        )
+        
+        # Update belief
+        self.belief_mean = post_mean.detach()
+        self.belief_log_var = post_log_var.detach()
+        
+        # Sample new state
+        std = torch.exp(0.5 * self.belief_log_var)
+        eps = torch.randn_like(std)
+        self.current_state = self.belief_mean + eps * std
+    
+    def learn(self, obs: torch.Tensor, action: torch.Tensor, next_obs: torch.Tensor,
+              reward: float = 0.0):
+        """
+        Online learning step using variational free energy minimization.
+        """
+        # Prepare action tensor
+        action_tensor = torch.zeros(self.action_dim)
+        if isinstance(action, int):
+            action_tensor[action] = 1.0
+        else:
+            action_tensor = action
+        
+        # Compute variational free energy
+        fe_result = self.compute_variational_free_energy(
+            obs,
+            self.belief_mean if self.belief_mean is not None else torch.zeros(self.state_dim),
+            action_tensor
+        )
+        
+        # Compute loss = free_energy - reward
+        loss = fe_result["free_energy"] - reward
+        
+        # Backpropagate
+        self.gen_optimizer.zero_grad()
+        self.rec_optimizer.zero_grad()
+        loss.backward()
+        
+        # Gradient clipping
+        torch.nn.utils.clip_grad_norm_(self.generative_model.parameters(), 1.0)
+        torch.nn.utils.clip_grad_norm_(self.recognition_model.parameters(), 1.0)
+        
+        self.gen_optimizer.step()
+        self.rec_optimizer.step()
+        
+        # Update belief
+        self.update_belief(obs, action_tensor)
+        
+        # Store in memory
+        if len(self.memory) >= self.memory_size:
+            self.memory.pop(0)
+        self.memory.append({
+            "obs": obs.detach().numpy(),
+            "action": action_tensor.detach().numpy(),
+            "next_obs": next_obs.detach().numpy(),
+            "reward": reward,
+            "fe": fe_result["free_energy"]
+        })
+        
+        self.training_steps += 1
+        
+        return fe_result
+    
+    def batch_learn(self, batch_size: int = 32):
+        """Batch learning from memory."""
+        if len(self.memory) < batch_size:
+            return
+        
+        # Sample batch
+        indices = np.random.choice(len(self.memory), batch_size, replace=False)
+        batch = [self.memory[i] for i in indices]
+        
+        total_loss = 0
+        for item in batch:
+            obs = torch.tensor(item["obs"], dtype=torch.float32)
+            action = torch.tensor(item["action"], dtype=torch.float32)
+            next_obs = torch.tensor(item["next_obs"], dtype=torch.float32)
+            reward = item["reward"]
+            
+            # Compute free energy
+            fe_result = self.compute_variational_free_energy(obs, self.belief_mean, action)
+            loss = fe_result["free_energy"] - reward
+            
+            total_loss += loss
+        
+        # Average loss
+        avg_loss = total_loss / batch_size
+        
+        # Backpropagate
+        self.gen_optimizer.zero_grad()
+        self.rec_optimizer.zero_grad()
+        avg_loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.generative_model.parameters(), 1.0)
+        torch.nn.utils.clip_grad_norm_(self.recognition_model.parameters(), 1.0)
+        self.gen_optimizer.step()
+        self.rec_optimizer.step()
 
+
+# ── Wrapper Functions ─────────────────────────────────────────────────────────
 
 def compute_fep_signals(
     prices: pd.Series,
@@ -208,121 +483,125 @@ def compute_fep_signals(
     config: Dict,
     train_agent: bool = True
 ) -> Dict:
-    """Compute Free Energy-Principled signals for a single ticker."""
+    """
+    Compute Free Energy-Principled signals for a single ticker.
+    """
+    # Prepare data
     returns = np.log(prices / prices.shift(1)).dropna().values
+    macro = macro_df.values
     
-    if len(returns) < 50:
+    if len(returns) < 100:
         return {
             "action": "HOLD",
             "free_energy": 0.0,
             "surprise": 0.0,
             "epistemic": 0.0,
-            "momentum": 0.0,
             "position": 0.0,
             "action_probabilities": [0.33, 0.33, 0.34],
             "window_signals": [],
-            "error": "Insufficient data"
+            "error": "Insufficient data (need at least 100 days)"
         }
     
     try:
-        windows = config.get("windows", [63, 252, 504, 1008, 2016, 4032])
-        primary_window = config.get("primary_window", 252)
+        # Initialize agent
+        agent = FEPAgent(config)
         
-        # Compute macro signal
-        macro_signal = compute_macro_signal(macro_df, -1)
+        # Training phase
+        if train_agent:
+            # Use last 200 days for training
+            train_len = min(200, len(returns) - 20)
+            train_returns = returns[-train_len-20:]
+            
+            for i in range(10, len(train_returns) - 10, 2):
+                # Prepare observations
+                obs_window = train_returns[max(0, i-10):i+1]
+                macro_window = macro[max(0, i-5):i+1] if len(macro) > 0 else np.zeros((1, 6))
+                
+                obs = agent.encode_observation(obs_window, macro_window)
+                next_obs = agent.encode_observation(
+                    train_returns[max(0, i-9):i+2],
+                    macro_window
+                )
+                
+                # Random action for exploration during training
+                action = np.random.randint(0, agent.n_actions)
+                
+                # Learn
+                agent.learn(obs, action, next_obs, reward=0.01)
+                
+                # Batch learn every 10 steps
+                if i % 10 == 0 and len(agent.memory) > 32:
+                    agent.batch_learn(batch_size=32)
         
+        # Inference
+        latest_returns = returns[-20:]
+        latest_macro = macro[-5:] if len(macro) > 0 else np.zeros((1, 6))
+        
+        obs = agent.encode_observation(latest_returns, latest_macro)
+        
+        # Select action
+        result = agent.select_action(obs, explore=False)
+        
+        # Compute surprise
+        surprise = result.get("surprise", 0.0)
+        
+        # Get free energy from the agent's belief
+        if agent.belief_mean is not None:
+            free_energy = agent.compute_variational_free_energy(
+                obs,
+                agent.belief_mean,
+                torch.zeros(agent.action_dim)
+            )["free_energy"]
+        else:
+            free_energy = 0.0
+        
+        # Window-specific signals (for breakdown)
         window_signals = []
-        fe_values = []
-        momentum_values = []
-        
-        for window in windows:
-            fe_result = compute_free_energy_with_macro(
-                returns, 
-                macro_signal, 
-                min(window, len(returns) - 1)
-            )
+        for window in config.get("windows", [63, 252, 504, 1008]):
+            # Quick approximation for each window
+            window_returns = returns[-min(window, len(returns)):]
+            window_macro = macro[-min(5, len(macro)):] if len(macro) > 0 else np.zeros((1, 6))
+            window_obs = agent.encode_observation(window_returns, window_macro)
+            
+            # Compute rough free energy for this window
+            if agent.belief_mean is not None:
+                fe = agent.compute_variational_free_energy(
+                    window_obs,
+                    agent.belief_mean,
+                    torch.zeros(agent.action_dim)
+                )["free_energy"]
+            else:
+                fe = 0.0
+            
             window_signals.append({
                 "window": window,
-                "free_energy": fe_result["free_energy"],
-                "surprise": fe_result["surprise"],
-                "epistemic": fe_result["epistemic"],
-                "momentum": fe_result["momentum"],
-                "mean": fe_result["mean"],
-                "std": fe_result["std"]
+                "free_energy": fe,
+                "surprise": surprise,
+                "epistemic": result.get("epistemic_value", 0.0),
+                "action": result.get("action_label", "HOLD")
             })
-            fe_values.append(fe_result["free_energy"])
-            momentum_values.append(fe_result["momentum"])
-        
-        # Weighted aggregate
-        weights = {}
-        for w in windows:
-            if w == primary_window:
-                weights[w] = 0.4
-            else:
-                weights[w] = 0.6 / (len(windows) - 1) if len(windows) > 1 else 0.6
-        
-        # Compute aggregate metrics
-        agg_free_energy = 0
-        agg_surprise = 0
-        agg_epistemic = 0
-        agg_momentum = 0
-        
-        for ws in window_signals:
-            w = ws["window"]
-            agg_free_energy += ws["free_energy"] * weights[w]
-            agg_surprise += ws["surprise"] * weights[w]
-            agg_epistemic += ws["epistemic"] * weights[w]
-            agg_momentum += ws["momentum"] * weights[w]
-        
-        # Normalize free energy to a reasonable range
-        agg_free_energy = max(-5, min(5, agg_free_energy))
-        
-        # Determine action based on free energy + momentum
-        # Lower free energy = better state = BUY signal
-        # Positive momentum = BUY signal
-        combined_score = -agg_free_energy + agg_momentum * 0.5
-        
-        if combined_score > 1.5:
-            action = "STRONG BUY"
-        elif combined_score > 0.5:
-            action = "BUY"
-        elif combined_score > -0.5:
-            action = "HOLD"
-        elif combined_score > -1.5:
-            action = "REDUCE"
-        else:
-            action = "STRONG SELL"
-        
-        # Calculate action probabilities (more differentiated)
-        prob_buy = max(0, min(1, (combined_score + 2) / 4))
-        prob_sell = max(0, min(1, (2 - combined_score) / 4))
-        prob_hold = max(0, 1 - prob_buy - prob_sell)
-        
-        # Position sizing based on combined score
-        position = np.tanh(combined_score / 2)  # Range: -1 to 1
         
         return {
-            "action": action,
-            "action_index": 0 if action in ["BUY", "STRONG BUY"] else (1 if action == "HOLD" else 2),
-            "free_energy": agg_free_energy,
-            "surprise": agg_surprise,
-            "epistemic": agg_epistemic,
-            "momentum": agg_momentum,
-            "position": position,
-            "action_probabilities": [float(prob_buy), float(prob_hold), float(prob_sell)],
+            "action": result.get("action_label", "HOLD"),
+            "action_index": result.get("action_index", 1),
+            "free_energy": free_energy,
+            "surprise": surprise,
+            "epistemic": result.get("epistemic_value", 0.0),
+            "position": agent.position,
+            "action_probabilities": result.get("action_probabilities", [0.33, 0.33, 0.34]),
             "window_signals": window_signals,
-            "weights": weights,
-            "macro_signal": macro_signal,
+            "pragmatic_value": result.get("pragmatic_value", 0.0),
+            "epistemic_value": result.get("epistemic_value", 0.0),
             "error": None
         }
         
     except Exception as e:
+        import traceback
         return {
             "action": "HOLD",
             "free_energy": 0.0,
             "surprise": 0.0,
             "epistemic": 0.0,
-            "momentum": 0.0,
             "position": 0.0,
             "action_probabilities": [0.33, 0.33, 0.34],
             "window_signals": [],
