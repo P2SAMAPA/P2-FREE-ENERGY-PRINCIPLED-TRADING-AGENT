@@ -59,6 +59,8 @@ def run_trainer(hf_token: Optional[str] = None) -> Dict:
         **config.FREE_ENERGY,
         **config.ACTION_SPACE,
         **config.EPISTEMIC_DRIVE,
+        "windows": config.WINDOWS,
+        "primary_window": config.PRIMARY_WINDOW,
     }
 
     # ── Results containers ────────────────────────────────────────────────────
@@ -76,10 +78,12 @@ def run_trainer(hf_token: Optional[str] = None) -> Dict:
     for universe_name, tickers in config.UNIVERSES.items():
         logger.info(f"\n🧠 Processing universe: {universe_name}")
 
+        # Filter available tickers
         available = [t for t in tickers if t in prices_df.columns]
         logger.info(f"   Available: {len(available)}/{len(tickers)}")
 
         if not available:
+            logger.warning(f"   No tickers available for {universe_name}")
             continue
 
         # Store results
@@ -89,25 +93,34 @@ def run_trainer(hf_token: Optional[str] = None) -> Dict:
         ticker_epistemic = {}
         ticker_position = {}
         ticker_signal = {}
+        ticker_window_signals = {}
 
         # ── Compute for each ticker ────────────────────────────────────────────
         for ticker in available:
             logger.info(f"   Computing {ticker}...")
             prices = prices_df[ticker]
             
-            result = compute_agent_signal(prices, macro_df, agent_config)
-            
-            if "error" not in result:
-                # Map action to numeric for scoring
-                action_map = {"BUY": 1.0, "HOLD": 0.0, "SELL": -1.0}
-                signal_value = action_map.get(result.get("action", "HOLD"), 0.0)
+            try:
+                result = compute_agent_signal(prices, macro_df, agent_config)
                 
-                ticker_actions[ticker] = result.get("action", "HOLD")
-                ticker_free_energy[ticker] = result.get("free_energy", 0)
-                ticker_surprise[ticker] = result.get("surprise", 0)
-                ticker_epistemic[ticker] = result.get("epistemic", 0)
-                ticker_position[ticker] = result.get("position", 0)
-                ticker_signal[ticker] = signal_value
+                if "error" not in result:
+                    # Map action to numeric for scoring
+                    action_map = {"BUY": 1.0, "HOLD": 0.0, "SELL": -1.0}
+                    signal_value = action_map.get(result.get("action", "HOLD"), 0.0)
+                    
+                    ticker_actions[ticker] = result.get("action", "HOLD")
+                    ticker_free_energy[ticker] = result.get("free_energy", 0)
+                    ticker_surprise[ticker] = result.get("surprise", 0)
+                    ticker_epistemic[ticker] = result.get("epistemic", 0)
+                    ticker_position[ticker] = result.get("position", 0)
+                    ticker_signal[ticker] = signal_value
+                    ticker_window_signals[ticker] = result.get("window_signals", [])
+                    
+                    logger.info(f"      {ticker}: {result.get('action', 'HOLD')} | F={result.get('free_energy', 0):.3f}")
+                else:
+                    logger.warning(f"      {ticker}: Error - {result.get('error')}")
+            except Exception as e:
+                logger.error(f"      {ticker}: Exception - {str(e)}")
 
         # ── Cross-sectional z-scores ──────────────────────────────────────────
         if ticker_signal:
@@ -127,14 +140,14 @@ def run_trainer(hf_token: Optional[str] = None) -> Dict:
                 else:
                     actions[ticker] = "STRONG SELL"
             
-            # Top 5 buys
+            # Top 5 buys (highest z-score)
             top_buys = sorted(
                 [(t, z_scores[t]) for t in z_scores if not np.isnan(z_scores[t])],
                 key=lambda x: x[1],
                 reverse=True
             )[:5]
             
-            # Top 5 sells
+            # Top 5 sells (lowest z-score)
             top_sells = sorted(
                 [(t, z_scores[t]) for t in z_scores if not np.isnan(z_scores[t])],
                 key=lambda x: x[1]
@@ -156,7 +169,8 @@ def run_trainer(hf_token: Optional[str] = None) -> Dict:
                         "surprise": ticker_surprise.get(t, 0),
                         "epistemic": ticker_epistemic.get(t, 0),
                         "position": ticker_position.get(t, 0),
-                        "signal": ticker_signal.get(t, 0)
+                        "signal": ticker_signal.get(t, 0),
+                        "window_signals": ticker_window_signals.get(t, [])
                     }
                     for t in ticker_signal.keys()
                 }
@@ -173,11 +187,16 @@ def run_trainer(hf_token: Optional[str] = None) -> Dict:
                         "surprise": ticker_surprise.get(t, 0),
                         "epistemic": ticker_epistemic.get(t, 0),
                         "position": ticker_position.get(t, 0),
-                        "signal": ticker_signal.get(t, 0)
+                        "signal": ticker_signal.get(t, 0),
+                        "window_signals": ticker_window_signals.get(t, [])
                     }
                     for t in ticker_signal.keys()
                 ]
             }
+            
+            logger.info(f"   ✅ {universe_name}: {len(ticker_signal)} tickers processed")
+        else:
+            logger.warning(f"   ⚠️ No signals generated for {universe_name}")
 
     # ── Save JSON files ──────────────────────────────────────────────────────
     logger.info("\n💾 Saving JSON results...")
@@ -186,10 +205,10 @@ def run_trainer(hf_token: Optional[str] = None) -> Dict:
     tab2_path = f"fep_agent_breakdown_{run_date}.json"
 
     with open(tab1_path, "w") as f:
-        json.dump(results_tab1, f, indent=2)
+        json.dump(results_tab1, f, indent=2, default=str)
 
     with open(tab2_path, "w") as f:
-        json.dump(results_tab2, f, indent=2)
+        json.dump(results_tab2, f, indent=2, default=str)
 
     logger.info(f"   Saved: {tab1_path}")
     logger.info(f"   Saved: {tab2_path}")
