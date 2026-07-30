@@ -1,0 +1,38 @@
+name: Daily FEP Agent Run
+
+on:
+  schedule:
+    - cron: '30 23 * * 1-6'
+  workflow_dispatch:
+
+jobs:
+  run-fep-agent:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          
+      - name: Run FEP Agent
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python trainer.py
+          
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fep-agent-results
+          path: |
+            fep_agent_*.json
+            fep_agent_breakdown_*.json
