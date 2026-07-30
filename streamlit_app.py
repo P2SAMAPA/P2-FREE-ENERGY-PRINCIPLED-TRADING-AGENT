@@ -144,6 +144,7 @@ st.sidebar.markdown("---")
 st.sidebar.markdown("**Free Energy Weights:**")
 st.sidebar.markdown(f"  • Pragmatic: {config.FREE_ENERGY['lambda_pragmatic']:.0%}")
 st.sidebar.markdown(f"  • Epistemic: {config.FREE_ENERGY['lambda_epistemic']:.0%}")
+st.sidebar.markdown(f"  • Momentum: {config.FREE_ENERGY['lambda_momentum']:.0%}")
 st.sidebar.markdown("---")
 st.sidebar.markdown("**Macro signals:**")
 for col, desc, w, sign in config.MACRO_SIGNALS:
@@ -214,6 +215,7 @@ with tab1:
         full_scores = uni_data.get("full_scores", {})
         
         if not full_scores:
+            st.warning(f"No data available for {UNIVERSE_LABELS.get(universe_name, universe_name)}")
             continue
 
         label = UNIVERSE_LABELS.get(universe_name, universe_name)
@@ -228,9 +230,9 @@ with tab1:
             action = info.get("action", "HOLD")
             
             # Composite: z-score (40%) + free_energy_reversed (30%) + epistemic (20%) + surprise_reversed (10%)
-            free_energy_norm = -np.clip(free_energy / 2, -1, 1)  # Lower free energy = better
-            surprise_norm = -np.clip(surprise / 2, -1, 1)  # Lower surprise = better
-            epistemic_norm = np.clip(epistemic, 0, 1)  # Higher epistemic = more exploration needed
+            free_energy_norm = -np.clip(free_energy / 2, -1, 1)
+            surprise_norm = -np.clip(surprise / 2, -1, 1)
+            epistemic_norm = np.clip(epistemic, 0, 1)
             
             composite = (0.40 * z_score + 
                         0.30 * free_energy_norm + 
@@ -264,7 +266,6 @@ with tab1:
             free_energy = etf["free_energy"]
             action = etf["action"]
             
-            # Rank badge
             rank_badge = "⭐" if idx == 0 else ("🥈" if idx == 1 else "🥉")
             
             with cols[idx]:
@@ -279,7 +280,7 @@ with tab1:
 </div>
 """, unsafe_allow_html=True)
         
-        # ── FULL RANKING TABLE (GREEN TO RED) ──────────────────────────────────
+        # ── FULL RANKING TABLE ──────────────────────────────────────────────────
         with st.expander(f"📋 Full Ranking — {label} (Green = Best to Buy, Red = Worst)"):
             rows = []
             for idx, etf in enumerate(ranked_etfs):
@@ -335,9 +336,10 @@ with tab1:
             st.dataframe(styled_df, use_container_width=True, hide_index=True)
             
             # Summary stats
-            best = ranked_etfs[0]
-            worst = ranked_etfs[-1]
-            st.caption(f"**Best:** {best['ticker']} (Composite: {best['composite']:+.3f}) | **Worst:** {worst['ticker']} (Composite: {worst['composite']:+.3f})")
+            if ranked_etfs:
+                best = ranked_etfs[0]
+                worst = ranked_etfs[-1]
+                st.caption(f"**Best:** {best['ticker']} (Composite: {best['composite']:+.3f}) | **Worst:** {worst['ticker']} (Composite: {worst['composite']:+.3f})")
         st.divider()
 
     st.caption(f"Run date: {data1.get('run_date','?')} · Composite = z-score(40%) + Free Energy(30%) + Epistemic(20%) + Surprise(10%)")
@@ -388,7 +390,8 @@ with tab2:
                 all_window_data[ticker][f"A_{w}"] = ws.get("action", "HOLD")
 
     if not all_window_data:
-        st.info("No window-level data available. Run trainer with multi-window support.")
+        st.warning("No window-level data available. Run trainer.py with multi-window support.")
+        st.info("Check that your data has window_signals in the JSON output.")
         st.stop()
 
     # Convert to DataFrame
@@ -407,16 +410,21 @@ with tab2:
             row[f"A_{w}"] = data.get(f"A_{w}", "HOLD")
         df_rows.append(row)
 
-    df = pd.DataFrame(df_rows).sort_values("z-score", ascending=False)
+    df = pd.DataFrame(df_rows)
+    
+    if df.empty:
+        st.warning("No data available to display.")
+        st.stop()
+    
+    df = df.sort_values("z-score", ascending=False)
 
     # ── Select Universe Filter ──────────────────────────────────────────────────
     universe_filter = st.selectbox(
         "Filter by Universe",
-        ["All Universes"] + [UNIVERSE_LABELS.get(u, u) for u in UNIVERSE_ORDER]
+        ["All Universes"] + [UNIVERSE_LABELS.get(u, u) for u in UNIVERSE_ORDER if u in df["Universe"].values]
     )
 
     if universe_filter != "All Universes":
-        # Find the universe key
         for key, label in UNIVERSE_LABELS.items():
             if label == universe_filter:
                 df = df[df["Universe"] == key]
@@ -442,9 +450,6 @@ with tab2:
     st.markdown(f"### 📊 Window: **{selected_window}d** — All ETFs Color-Coded")
 
     # Prepare columns for display
-    display_columns = ["Rank", "ETF", "Universe", "z-score", "Action", f"FE_{selected_window}", f"S_{selected_window}", f"E_{selected_window}", f"A_{selected_window}"]
-
-    # Create display DataFrame
     display_rows = []
     for idx, row in df.iterrows():
         display_rows.append({
@@ -459,6 +464,10 @@ with tab2:
             f"Action @ {selected_window}d": row[f"A_{selected_window}"]
         })
 
+    if not display_rows:
+        st.warning(f"No data available for window {selected_window}d")
+        st.stop()
+    
     display_df = pd.DataFrame(display_rows).sort_values("z-score", ascending=False)
     display_df["Rank"] = range(1, len(display_df) + 1)
 
@@ -505,14 +514,14 @@ with tab2:
 
     top_3_window = display_df.head(3)
     cols = st.columns(3)
-    for idx, row in top_3_window.iterrows():
+    for idx, (_, row) in enumerate(top_3_window.iterrows()):
         ticker = row["ETF"]
         z_score = row["z-score"]
         fe = row[f"Free Energy ({selected_window}d)"]
         action = row[f"Action @ {selected_window}d"]
         rank_badge = "⭐" if idx == 0 else ("🥈" if idx == 1 else "🥉")
         
-        with cols[idx % 3]:
+        with cols[idx]:
             st.markdown(f"""
 <div class="top-card">
   <div class="ticker">{rank_badge} {ticker}</div>
