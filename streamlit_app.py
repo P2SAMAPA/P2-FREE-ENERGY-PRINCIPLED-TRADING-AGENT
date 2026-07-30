@@ -144,7 +144,6 @@ st.sidebar.markdown("---")
 st.sidebar.markdown("**Free Energy Weights:**")
 st.sidebar.markdown(f"  • Pragmatic: {config.FREE_ENERGY['lambda_pragmatic']:.0%}")
 st.sidebar.markdown(f"  • Epistemic: {config.FREE_ENERGY['lambda_epistemic']:.0%}")
-st.sidebar.markdown(f"  • Momentum: {config.FREE_ENERGY['lambda_momentum']:.0%}")
 st.sidebar.markdown("---")
 st.sidebar.markdown("**Macro signals:**")
 for col, desc, w, sign in config.MACRO_SIGNALS:
@@ -202,10 +201,11 @@ with tab1:
 
 | Component | What it does |
 |-----------|--------------|
-| **Generative Model** | Learns market dynamics and trading impact |
+| **Generative Model** | Neural network that learns market dynamics |
+| **Recognition Model** | Variational inference for belief updating |
 | **Pragmatic Drive** | Minimizes prediction error (exploitation) |
 | **Epistemic Drive** | Reduces model uncertainty (exploration) |
-| **Free Energy** | Unified objective combining both drives |
+| **Free Energy** | Unified objective: KL divergence + expected log-likelihood |
 
 **Composite Score** = z-score (40%) + Free Energy (30%) + Epistemic (20%) + Surprise (10%)
         """)
