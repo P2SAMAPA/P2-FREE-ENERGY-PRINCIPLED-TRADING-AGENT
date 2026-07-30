@@ -103,24 +103,40 @@ def run_trainer(hf_token: Optional[str] = None) -> Dict:
             try:
                 result = compute_agent_signal(prices, macro_df, agent_config)
                 
-                if "error" not in result:
-                    # Map action to numeric for scoring
-                    action_map = {"BUY": 1.0, "HOLD": 0.0, "SELL": -1.0}
-                    signal_value = action_map.get(result.get("action", "HOLD"), 0.0)
-                    
-                    ticker_actions[ticker] = result.get("action", "HOLD")
-                    ticker_free_energy[ticker] = result.get("free_energy", 0)
-                    ticker_surprise[ticker] = result.get("surprise", 0)
-                    ticker_epistemic[ticker] = result.get("epistemic", 0)
-                    ticker_position[ticker] = result.get("position", 0)
-                    ticker_signal[ticker] = signal_value
-                    ticker_window_signals[ticker] = result.get("window_signals", [])
-                    
-                    logger.info(f"      {ticker}: {result.get('action', 'HOLD')} | F={result.get('free_energy', 0):.3f}")
-                else:
-                    logger.warning(f"      {ticker}: Error - {result.get('error')}")
+                # Check for errors properly
+                error = result.get("error")
+                if error is not None and str(error) != "None" and str(error) != "":
+                    logger.warning(f"      {ticker}: Error - {error}")
+                    continue
+                
+                # Check if we have a valid action
+                action = result.get("action", "HOLD")
+                if action == "INSUFFICIENT DATA":
+                    logger.warning(f"      {ticker}: Insufficient data")
+                    continue
+                
+                # Get free energy value
+                free_energy = result.get("free_energy", 0)
+                if free_energy is None:
+                    free_energy = 0
+                
+                # Map action to numeric for scoring
+                action_map = {"BUY": 1.0, "HOLD": 0.0, "SELL": -1.0}
+                signal_value = action_map.get(action, 0.0)
+                
+                ticker_actions[ticker] = action
+                ticker_free_energy[ticker] = float(free_energy)
+                ticker_surprise[ticker] = float(result.get("surprise", 0) or 0)
+                ticker_epistemic[ticker] = float(result.get("epistemic", 0) or 0)
+                ticker_position[ticker] = float(result.get("position", 0) or 0)
+                ticker_signal[ticker] = float(signal_value)
+                ticker_window_signals[ticker] = result.get("window_signals", [])
+                
+                logger.info(f"      {ticker}: {action} | F={free_energy:.3f}")
+                
             except Exception as e:
                 logger.error(f"      {ticker}: Exception - {str(e)}")
+                continue
 
         # ── Cross-sectional z-scores ──────────────────────────────────────────
         if ticker_signal:
